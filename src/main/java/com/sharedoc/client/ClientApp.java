@@ -9,12 +9,17 @@ import com.sharedoc.server.ServerConfig;
 import com.sharedoc.util.DateTimeUtil;
 
 import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.Paths;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Scanner;
 
 /**
- * Console client workflow skeleton.
- * Displays basic menus and reserves methods for login, document, edit, and version operations.
+ * Console client workflow.
+ * Displays basic menus and implements login, document, edit, and version operations.
  */
 public class ClientApp {
     private final Scanner scanner = new Scanner(System.in);
@@ -118,8 +123,24 @@ public class ClientApp {
             return;
         }
 
-        System.out.println("提示：当前服务端上传仍为占位实现，客户端这次仅发送路径信息。");
-        printResponse(sendRequest(new Request(RequestType.UPLOAD_DOCUMENT, currentUsername, null, filePath)));
+        Path path = Paths.get(filePath);
+        if (!Files.exists(path)) {
+            System.out.println("[失败] 文件不存在：" + filePath);
+            return;
+        }
+
+        try {
+            byte[] fileContent = Files.readAllBytes(path);
+            String fileName = path.getFileName().toString();
+
+            Map<String, Object> payload = new HashMap<>();
+            payload.put("fileName", fileName);
+            payload.put("fileContent", fileContent);
+
+            printResponse(sendRequest(new Request(RequestType.UPLOAD_DOCUMENT, currentUsername, null, payload)));
+        } catch (IOException e) {
+            System.out.println("[失败] 读取文件失败：" + e.getMessage());
+        }
     }
 
     private void downloadDocument() {
@@ -131,8 +152,38 @@ public class ClientApp {
             return;
         }
 
-        System.out.println("提示：当前服务端下载仍为占位实现，客户端暂不执行本地落盘。");
-        printResponse(sendRequest(new Request(RequestType.DOWNLOAD_DOCUMENT, currentUsername, documentId, null)));
+        Response response = sendRequest(new Request(RequestType.DOWNLOAD_DOCUMENT, currentUsername, documentId, null));
+        if (response != null && response.isSuccess() && response.getData() instanceof Map) {
+            Map<?, ?> data = (Map<?, ?>) response.getData();
+            Document document = (Document) data.get("document");
+            byte[] fileContent = (byte[]) data.get("fileContent");
+
+            String savePathInput = promptRequired("保存路径（目录或完整路径）：");
+            if (savePathInput == null) {
+                System.out.println("[失败] 未输入保存路径");
+                return;
+            }
+
+            try {
+                Path inputPath = Paths.get(savePathInput);
+                Path savePath;
+
+                if (Files.isDirectory(inputPath) || !savePathInput.contains(".")) {
+                    Files.createDirectories(inputPath);
+                    savePath = inputPath.resolve(document.getFileName());
+                } else {
+                    Files.createDirectories(inputPath.getParent());
+                    savePath = inputPath;
+                }
+
+                Files.write(savePath, fileContent);
+                System.out.println("[成功] 文件已保存到：" + savePath);
+            } catch (IOException e) {
+                System.out.println("[失败] 保存文件失败：" + e.getMessage());
+            }
+        } else {
+            printResponse(response);
+        }
     }
 
     private void viewDocument() {
@@ -143,7 +194,30 @@ public class ClientApp {
         if (documentId == null) {
             return;
         }
-        printResponse(sendRequest(new Request(RequestType.VIEW_DOCUMENT, currentUsername, documentId, null)));
+
+        Response response = sendRequest(new Request(RequestType.VIEW_DOCUMENT, currentUsername, documentId, null));
+        if (response != null && response.isSuccess() && response.getData() instanceof Map) {
+            Map<?, ?> data = (Map<?, ?>) response.getData();
+            Document document = (Document) data.get("document");
+            String preview = (String) data.get("preview");
+            Boolean isTextFile = (Boolean) data.get("isTextFile");
+
+            System.out.println("[成功] 文档查看成功");
+            System.out.println("文件名：" + document.getFileName());
+            System.out.println("所有者：" + document.getOwner());
+            System.out.println("上传时间：" + formatTime(document.getUploadTime()));
+            System.out.println("最后修改：" + formatTime(document.getLastModifiedTime()));
+            System.out.println();
+
+            if (isTextFile != null && isTextFile) {
+                System.out.println("=== 文档预览 ===");
+                System.out.println(preview);
+            } else {
+                System.out.println("非文本文件，无法预览。");
+            }
+        } else {
+            printResponse(response);
+        }
     }
 
     private void requestEdit() {
@@ -166,12 +240,23 @@ public class ClientApp {
             return;
         }
 
-        System.out.print("保存备注（可留空）：");
-        String comment = scanner.nextLine().trim();
-        Object payload = comment.isEmpty() ? null : comment;
+        String filePath = promptRequired("本地文件路径：");
+        if (filePath == null) {
+            return;
+        }
 
-        System.out.println("提示：当前服务端保存仍为占位实现，客户端此次仅发送文档 ID 和备注。");
-        printResponse(sendRequest(new Request(RequestType.SAVE_DOCUMENT, currentUsername, documentId, payload)));
+        Path path = Paths.get(filePath);
+        if (!Files.exists(path)) {
+            System.out.println("[失败] 文件不存在：" + filePath);
+            return;
+        }
+
+        try {
+            byte[] fileContent = Files.readAllBytes(path);
+            printResponse(sendRequest(new Request(RequestType.SAVE_DOCUMENT, currentUsername, documentId, fileContent)));
+        } catch (IOException e) {
+            System.out.println("[失败] 读取文件失败：" + e.getMessage());
+        }
     }
 
     private void releaseEdit() {
