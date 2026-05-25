@@ -250,6 +250,8 @@ java -cp target/classes com.sharedoc.client.ClientMain
 - 与服务器通信
 - README 整理与测试文档
 
+当前成员 D 交付的客户端交接与联调说明见 [handover-D.md](./handover-D.md)。
+
 ## 12. 当前阶段说明
 
 - 当前代码只是基础框架。

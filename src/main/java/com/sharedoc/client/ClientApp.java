@@ -1,11 +1,15 @@
 package com.sharedoc.client;
 
+import com.sharedoc.model.Document;
+import com.sharedoc.model.DocumentVersion;
 import com.sharedoc.model.Request;
 import com.sharedoc.model.RequestType;
 import com.sharedoc.model.Response;
 import com.sharedoc.server.ServerConfig;
+import com.sharedoc.util.DateTimeUtil;
 
 import java.io.IOException;
+import java.util.List;
 import java.util.Scanner;
 
 /**
@@ -20,10 +24,12 @@ public class ClientApp {
     public void start() {
         try {
             connection.connect("localhost", ServerConfig.PORT);
+            System.out.println("已连接到服务器 localhost:" + ServerConfig.PORT);
             showMainMenu();
         } catch (IOException e) {
-            System.err.println("Unable to connect to server: " + e.getMessage());
+            System.err.println("无法连接服务器：" + e.getMessage());
         } finally {
+            logoutOnExit();
             connection.close();
         }
     }
@@ -32,123 +38,354 @@ public class ClientApp {
         boolean running = true;
         while (running) {
             printMenu();
-            String choice = scanner.nextLine();
+            String choice = scanner.nextLine().trim();
             switch (choice) {
                 case "1" -> login();
-                case "2" -> listDocuments();
-                case "3" -> uploadDocument();
-                case "4" -> downloadDocument();
-                case "5" -> viewDocument();
-                case "6" -> requestEdit();
-                case "7" -> saveDocument();
-                case "8" -> releaseEdit();
-                case "9" -> listVersions();
-                case "10" -> downloadVersion();
-                case "11" -> rollbackVersion();
+                case "2" -> logout();
+                case "3" -> listDocuments();
+                case "4" -> uploadDocument();
+                case "5" -> downloadDocument();
+                case "6" -> viewDocument();
+                case "7" -> requestEdit();
+                case "8" -> saveDocument();
+                case "9" -> releaseEdit();
+                case "10" -> listVersions();
+                case "11" -> downloadVersion();
+                case "12" -> rollbackVersion();
                 case "0" -> running = false;
-                default -> System.out.println("Unknown menu choice.");
+                default -> System.out.println("无效菜单编号，请重新输入。");
             }
         }
     }
 
     private void printMenu() {
         System.out.println();
-        System.out.println("==== Shared Document Client ====");
-        System.out.println("1. Login");
-        System.out.println("2. List documents");
-        System.out.println("3. Upload document");
-        System.out.println("4. Download document");
-        System.out.println("5. View document");
-        System.out.println("6. Request edit permission");
-        System.out.println("7. Save document");
-        System.out.println("8. Release edit permission");
-        System.out.println("9. List versions");
-        System.out.println("10. Download version");
-        System.out.println("11. Rollback version");
-        System.out.println("0. Exit");
-        System.out.print("Choose: ");
+        System.out.println("==== 共享文档客户端 ====");
+        System.out.println("当前用户：" + (isLoggedIn() ? currentUsername : "未登录"));
+        System.out.println("1. 登录");
+        System.out.println("2. 登出");
+        System.out.println("3. 查看文档列表");
+        System.out.println("4. 上传文档");
+        System.out.println("5. 下载文档");
+        System.out.println("6. 只读查看文档");
+        System.out.println("7. 申请编辑权限");
+        System.out.println("8. 保存文档");
+        System.out.println("9. 释放编辑权限");
+        System.out.println("10. 查看历史版本");
+        System.out.println("11. 下载历史版本");
+        System.out.println("12. 回滚版本");
+        System.out.println("0. 退出");
+        System.out.print("请输入菜单编号：");
     }
 
     private void login() {
-        // TODO: Ask for username/password and send LOGIN request.
-        System.out.print("Username: ");
-        currentUsername = scanner.nextLine();
-        sendAndPrint(new Request(RequestType.LOGIN, currentUsername, null, "123456"));
+        if (isLoggedIn()) {
+            System.out.println("当前已登录用户：" + currentUsername + "。如需切换账号，请先登出。");
+            return;
+        }
+
+        String username = promptRequired("用户名：");
+        if (username == null) {
+            return;
+        }
+
+        String password = promptRequired("密码：");
+        if (password == null) {
+            return;
+        }
+
+        Response response = sendRequest(new Request(RequestType.LOGIN, username, null, password));
+        printResponse(response);
+        if (response != null && response.isSuccess()) {
+            currentUsername = username;
+        }
     }
 
     private void listDocuments() {
-        // TODO: Render document metadata returned by server.
-        sendAndPrint(new Request(RequestType.LIST_DOCUMENTS, currentUsername, null, null));
+        if (!requireLogin()) {
+            return;
+        }
+        printResponse(sendRequest(new Request(RequestType.LIST_DOCUMENTS, currentUsername, null, null)));
     }
 
     private void uploadDocument() {
-        // TODO: Ask for local path, read file bytes, and send UPLOAD_DOCUMENT request.
-        sendAndPrint(new Request(RequestType.UPLOAD_DOCUMENT, currentUsername, null, null));
+        if (!requireLogin()) {
+            return;
+        }
+
+        String filePath = promptRequired("本地文件路径：");
+        if (filePath == null) {
+            return;
+        }
+
+        System.out.println("提示：当前服务端上传仍为占位实现，客户端这次仅发送路径信息。");
+        printResponse(sendRequest(new Request(RequestType.UPLOAD_DOCUMENT, currentUsername, null, filePath)));
     }
 
     private void downloadDocument() {
-        // TODO: Ask for document ID and save returned bytes locally.
+        if (!requireLogin()) {
+            return;
+        }
         String documentId = readDocumentId();
-        sendAndPrint(new Request(RequestType.DOWNLOAD_DOCUMENT, currentUsername, documentId, null));
+        if (documentId == null) {
+            return;
+        }
+
+        System.out.println("提示：当前服务端下载仍为占位实现，客户端暂不执行本地落盘。");
+        printResponse(sendRequest(new Request(RequestType.DOWNLOAD_DOCUMENT, currentUsername, documentId, null)));
     }
 
     private void viewDocument() {
-        // TODO: Ask for document ID and display read-only content preview.
+        if (!requireLogin()) {
+            return;
+        }
         String documentId = readDocumentId();
-        sendAndPrint(new Request(RequestType.VIEW_DOCUMENT, currentUsername, documentId, null));
+        if (documentId == null) {
+            return;
+        }
+        printResponse(sendRequest(new Request(RequestType.VIEW_DOCUMENT, currentUsername, documentId, null)));
     }
 
     private void requestEdit() {
-        // TODO: Ask for document ID and request exclusive edit lock.
+        if (!requireLogin()) {
+            return;
+        }
         String documentId = readDocumentId();
-        sendAndPrint(new Request(RequestType.REQUEST_EDIT, currentUsername, documentId, null));
+        if (documentId == null) {
+            return;
+        }
+        printResponse(sendRequest(new Request(RequestType.REQUEST_EDIT, currentUsername, documentId, null)));
     }
 
     private void saveDocument() {
-        // TODO: Collect edited content or file path and send SAVE_DOCUMENT request.
+        if (!requireLogin()) {
+            return;
+        }
         String documentId = readDocumentId();
-        sendAndPrint(new Request(RequestType.SAVE_DOCUMENT, currentUsername, documentId, null));
+        if (documentId == null) {
+            return;
+        }
+
+        System.out.print("保存备注（可留空）：");
+        String comment = scanner.nextLine().trim();
+        Object payload = comment.isEmpty() ? null : comment;
+
+        System.out.println("提示：当前服务端保存仍为占位实现，客户端此次仅发送文档 ID 和备注。");
+        printResponse(sendRequest(new Request(RequestType.SAVE_DOCUMENT, currentUsername, documentId, payload)));
     }
 
     private void releaseEdit() {
-        // TODO: Release edit lock for the selected document.
+        if (!requireLogin()) {
+            return;
+        }
         String documentId = readDocumentId();
-        sendAndPrint(new Request(RequestType.RELEASE_EDIT, currentUsername, documentId, null));
+        if (documentId == null) {
+            return;
+        }
+        printResponse(sendRequest(new Request(RequestType.RELEASE_EDIT, currentUsername, documentId, null)));
     }
 
     private void listVersions() {
-        // TODO: Render historical versions for the selected document.
+        if (!requireLogin()) {
+            return;
+        }
         String documentId = readDocumentId();
-        sendAndPrint(new Request(RequestType.LIST_VERSIONS, currentUsername, documentId, null));
+        if (documentId == null) {
+            return;
+        }
+        printResponse(sendRequest(new Request(RequestType.LIST_VERSIONS, currentUsername, documentId, null)));
     }
 
     private void downloadVersion() {
-        // TODO: Ask for version ID and save version bytes locally.
-        System.out.print("Version ID: ");
-        String versionId = scanner.nextLine();
-        sendAndPrint(new Request(RequestType.DOWNLOAD_VERSION, currentUsername, null, versionId));
+        if (!requireLogin()) {
+            return;
+        }
+
+        String versionId = promptRequired("版本 ID：");
+        if (versionId == null) {
+            return;
+        }
+
+        System.out.println("提示：当前服务端历史版本下载仍为占位实现，客户端暂不执行本地落盘。");
+        printResponse(sendRequest(new Request(RequestType.DOWNLOAD_VERSION, currentUsername, null, versionId)));
     }
 
     private void rollbackVersion() {
-        // TODO: Ask for document ID and version ID, then send ROLLBACK_VERSION request.
+        if (!requireLogin()) {
+            return;
+        }
+
         String documentId = readDocumentId();
-        System.out.print("Version ID: ");
-        String versionId = scanner.nextLine();
-        sendAndPrint(new Request(RequestType.ROLLBACK_VERSION, currentUsername, documentId, versionId));
+        if (documentId == null) {
+            return;
+        }
+
+        String versionId = promptRequired("版本 ID：");
+        if (versionId == null) {
+            return;
+        }
+
+        System.out.println("提示：当前服务端版本回滚仍为占位实现，客户端仅发送回滚请求。");
+        printResponse(sendRequest(new Request(RequestType.ROLLBACK_VERSION, currentUsername, documentId, versionId)));
     }
 
     private String readDocumentId() {
-        System.out.print("Document ID: ");
-        return scanner.nextLine();
+        return promptRequired("文档 ID：");
     }
 
-    private void sendAndPrint(Request request) {
+    private Response sendRequest(Request request) {
         try {
             connection.sendRequest(request);
-            Response response = connection.receiveResponse();
-            System.out.println(response.getMessage());
+            return connection.receiveResponse();
         } catch (IOException | ClassNotFoundException e) {
-            System.err.println("Request failed: " + e.getMessage());
+            System.err.println("请求失败：" + e.getMessage());
+            return null;
         }
+    }
+
+    private void printResponse(Response response) {
+        if (response == null) {
+            return;
+        }
+
+        String prefix = response.isSuccess() ? "[成功] " : "[失败] ";
+        System.out.println(prefix + response.getMessage());
+
+        Object data = response.getData();
+        if (data == null) {
+            return;
+        }
+
+        if (data instanceof Document document) {
+            printDocument(document);
+            return;
+        }
+
+        if (data instanceof DocumentVersion version) {
+            printVersion(version);
+            return;
+        }
+
+        if (data instanceof List<?> list) {
+            printListData(list);
+            return;
+        }
+
+        System.out.println("返回数据：" + data);
+    }
+
+    private void printListData(List<?> list) {
+        if (list.isEmpty()) {
+            System.out.println("暂无数据。");
+            return;
+        }
+
+        Object first = list.get(0);
+        if (first instanceof Document) {
+            System.out.println("文档列表：");
+            for (Object item : list) {
+                if (item instanceof Document document) {
+                    printDocument(document);
+                }
+            }
+            return;
+        }
+
+        if (first instanceof DocumentVersion) {
+            System.out.println("版本列表：");
+            for (Object item : list) {
+                if (item instanceof DocumentVersion version) {
+                    printVersion(version);
+                }
+            }
+            return;
+        }
+
+        for (Object item : list) {
+            System.out.println("- " + item);
+        }
+    }
+
+    private void printDocument(Document document) {
+        System.out.println("文档ID: " + safeValue(document.getDocumentId()));
+        System.out.println("文件名: " + safeValue(document.getFileName()));
+        System.out.println("所有者: " + safeValue(document.getOwner()));
+        System.out.println("当前路径: " + safeValue(document.getCurrentPath()));
+        System.out.println("上传时间: " + formatTime(document.getUploadTime()));
+        System.out.println("最后修改: " + formatTime(document.getLastModifiedTime()));
+        System.out.println("编辑用户: " + safeValue(document.getEditingUser(), "无"));
+        System.out.println("开始编辑: " + safeValue(formatTime(document.getEditingStartTime()), "无"));
+        System.out.println();
+    }
+
+    private void printVersion(DocumentVersion version) {
+        System.out.println("版本ID: " + safeValue(version.getVersionId()));
+        System.out.println("文档ID: " + safeValue(version.getDocumentId()));
+        System.out.println("文件名: " + safeValue(version.getFileName()));
+        System.out.println("编辑者: " + safeValue(version.getEditor()));
+        System.out.println("操作时间: " + formatTime(version.getEditTime()));
+        System.out.println("操作类型: " + (version.getOperationType() == null ? "未知" : version.getOperationType().name()));
+        System.out.println("版本路径: " + safeValue(version.getVersionPath()));
+        System.out.println("备注: " + safeValue(version.getComment(), "无"));
+        System.out.println();
+    }
+
+    private boolean requireLogin() {
+        if (isLoggedIn()) {
+            return true;
+        }
+        System.out.println("请先登录后再执行该操作。");
+        return false;
+    }
+
+    private boolean isLoggedIn() {
+        return currentUsername != null && !currentUsername.isBlank();
+    }
+
+    private void logout() {
+        if (!isLoggedIn()) {
+            System.out.println("当前未登录，无需登出。");
+            return;
+        }
+
+        Response response = sendRequest(new Request(RequestType.LOGOUT, currentUsername, null, null));
+        printResponse(response);
+        if (response != null && response.isSuccess()) {
+            currentUsername = null;
+        }
+    }
+
+    private void logoutOnExit() {
+        if (!isLoggedIn() || !connection.isConnected()) {
+            return;
+        }
+
+        Response response = sendRequest(new Request(RequestType.LOGOUT, currentUsername, null, null));
+        if (response != null) {
+            System.out.println("[退出前登出] " + response.getMessage());
+        }
+        currentUsername = null;
+    }
+
+    private String promptRequired(String prompt) {
+        System.out.print(prompt);
+        String input = scanner.nextLine().trim();
+        if (input.isEmpty()) {
+            System.out.println("输入不能为空，本次操作已取消。");
+            return null;
+        }
+        return input;
+    }
+
+    private String formatTime(java.time.LocalDateTime dateTime) {
+        return safeValue(DateTimeUtil.format(dateTime), "无");
+    }
+
+    private String safeValue(String value) {
+        return safeValue(value, "未提供");
+    }
+
+    private String safeValue(String value, String defaultValue) {
+        return (value == null || value.isBlank()) ? defaultValue : value;
     }
 }
