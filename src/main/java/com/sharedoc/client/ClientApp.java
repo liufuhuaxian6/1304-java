@@ -291,8 +291,38 @@ public class ClientApp {
             return;
         }
 
-        System.out.println("提示：当前服务端历史版本下载仍为占位实现，客户端暂不执行本地落盘。");
-        printResponse(sendRequest(new Request(RequestType.DOWNLOAD_VERSION, currentUsername, null, versionId)));
+        Response response = sendRequest(new Request(RequestType.DOWNLOAD_VERSION, currentUsername, null, versionId));
+        if (response != null && response.isSuccess() && response.getData() instanceof Map) {
+            Map<?, ?> data = (Map<?, ?>) response.getData();
+            DocumentVersion version = (DocumentVersion) data.get("version");
+            byte[] fileContent = (byte[]) data.get("fileContent");
+
+            String savePathInput = promptRequired("保存路径（目录或完整路径）：");
+            if (savePathInput == null) {
+                System.out.println("[失败] 未输入保存路径");
+                return;
+            }
+
+            try {
+                Path inputPath = Paths.get(savePathInput);
+                Path savePath;
+
+                if (Files.isDirectory(inputPath) || !savePathInput.contains(".")) {
+                    Files.createDirectories(inputPath);
+                    savePath = inputPath.resolve(version.getVersionId() + "-" + version.getFileName());
+                } else {
+                    Files.createDirectories(inputPath.getParent());
+                    savePath = inputPath;
+                }
+
+                Files.write(savePath, fileContent);
+                System.out.println("[成功] 历史版本已保存到：" + savePath);
+            } catch (IOException e) {
+                System.out.println("[失败] 保存文件失败：" + e.getMessage());
+            }
+        } else {
+            printResponse(response);
+        }
     }
 
     private void rollbackVersion() {
@@ -310,8 +340,26 @@ public class ClientApp {
             return;
         }
 
-        System.out.println("提示：当前服务端版本回滚仍为占位实现，客户端仅发送回滚请求。");
-        printResponse(sendRequest(new Request(RequestType.ROLLBACK_VERSION, currentUsername, documentId, versionId)));
+        System.out.println("提示：回滚前请确认已申请该文档的编辑权限。");
+        Response response = sendRequest(new Request(RequestType.ROLLBACK_VERSION, currentUsername, documentId, versionId));
+        if (response != null && response.isSuccess() && response.getData() instanceof Map) {
+            Map<?, ?> data = (Map<?, ?>) response.getData();
+            System.out.println("[成功] " + response.getMessage());
+            if (data.get("document") instanceof Document document) {
+                System.out.println("=== 当前文档 ===");
+                printDocument(document);
+            }
+            if (data.get("rolledBackFrom") instanceof DocumentVersion source) {
+                System.out.println("=== 回滚来源版本 ===");
+                printVersion(source);
+            }
+            if (data.get("rollbackVersion") instanceof DocumentVersion rollback) {
+                System.out.println("=== 新生成的回滚版本 ===");
+                printVersion(rollback);
+            }
+        } else {
+            printResponse(response);
+        }
     }
 
     private String readDocumentId() {
@@ -376,6 +424,16 @@ public class ClientApp {
             return;
         }
 
+        if (first instanceof Map) {
+            System.out.println("文档列表：");
+            for (Object item : list) {
+                if (item instanceof Map<?, ?> docInfo) {
+                    printDocumentInfo(docInfo);
+                }
+            }
+            return;
+        }
+
         if (first instanceof DocumentVersion) {
             System.out.println("版本列表：");
             for (Object item : list) {
@@ -389,6 +447,32 @@ public class ClientApp {
         for (Object item : list) {
             System.out.println("- " + item);
         }
+    }
+
+    private void printDocumentInfo(Map<?, ?> docInfo) {
+        System.out.println("文档ID: " + mapValue(docInfo.get("documentId")));
+        System.out.println("文件名: " + mapValue(docInfo.get("fileName")));
+        System.out.println("所有者: " + mapValue(docInfo.get("owner")));
+        System.out.println("上传时间: " + mapTime(docInfo.get("uploadTime")));
+        System.out.println("最后修改: " + mapTime(docInfo.get("lastModifiedTime")));
+        boolean editing = Boolean.TRUE.equals(docInfo.get("isEditing"));
+        if (editing) {
+            System.out.println("编辑状态: 编辑中（" + mapValue(docInfo.get("editingUser")) + "）");
+        } else {
+            System.out.println("编辑状态: 空闲");
+        }
+        System.out.println();
+    }
+
+    private String mapValue(Object value) {
+        return value == null ? "未提供" : String.valueOf(value);
+    }
+
+    private String mapTime(Object value) {
+        if (value instanceof java.time.LocalDateTime dateTime) {
+            return formatTime(dateTime);
+        }
+        return value == null ? "无" : String.valueOf(value);
     }
 
     private void printDocument(Document document) {

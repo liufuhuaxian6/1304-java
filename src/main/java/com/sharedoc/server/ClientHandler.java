@@ -70,7 +70,7 @@ public class ClientHandler implements Runnable {
             case RELEASE_EDIT -> documentService.releaseEdit(request.getDocumentId(), request.getUsername());
             case LIST_VERSIONS -> versionService.listVersions(request.getDocumentId());
             case DOWNLOAD_VERSION -> versionService.downloadVersion(String.valueOf(request.getPayload()));
-            case ROLLBACK_VERSION -> versionService.rollbackToVersion(request.getDocumentId(), String.valueOf(request.getPayload()));
+            case ROLLBACK_VERSION -> documentService.rollbackDocumentToVersion(request);
         };
     }
 

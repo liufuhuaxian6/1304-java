@@ -1,5 +1,8 @@
 package com.sharedoc.service;
 
+import java.util.ArrayList;
+import java.util.Iterator;
+import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 
@@ -19,11 +22,28 @@ public class LockService {
         return true;
     }
 
-    public synchronized void unlockDocument(String documentId, String username) {
-        // TODO: Verify permissions and record lock release events.
+    public synchronized boolean unlockDocument(String documentId, String username) {
         if (username != null && username.equals(DOCUMENT_LOCKS.get(documentId))) {
             DOCUMENT_LOCKS.remove(documentId);
+            return true;
         }
+        return false;
+    }
+
+    public synchronized List<String> releaseAllLocksHeldBy(String username) {
+        List<String> released = new ArrayList<>();
+        if (username == null) {
+            return released;
+        }
+        Iterator<Map.Entry<String, String>> iterator = DOCUMENT_LOCKS.entrySet().iterator();
+        while (iterator.hasNext()) {
+            Map.Entry<String, String> entry = iterator.next();
+            if (username.equals(entry.getValue())) {
+                released.add(entry.getKey());
+                iterator.remove();
+            }
+        }
+        return released;
     }
 
     public String getLockOwner(String documentId) {

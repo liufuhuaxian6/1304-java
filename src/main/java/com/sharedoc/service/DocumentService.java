@@ -22,6 +22,7 @@ import java.util.concurrent.ConcurrentHashMap;
 public class DocumentService {
     private static final Map<String, Document> DOCUMENTS = new ConcurrentHashMap<>();
     private static final LockService LOCK_SERVICE = new LockService();
+    private static final VersionService VERSION_SERVICE = new VersionService();
 
     private final FileStorage fileStorage = new FileStorage();
 
@@ -76,8 +77,21 @@ public class DocumentService {
             Document document = new Document(documentId, fileName, username, storagePath);
             DOCUMENTS.put(documentId, document);
 
+            Response versionResponse = VERSION_SERVICE.createInitialVersion(
+                    documentId,
+                    fileName,
+                    username,
+                    storagePath
+            );
+            if (!versionResponse.isSuccess()) {
+                DOCUMENTS.remove(documentId);
+                fileStorage.deleteFile(storagePath);
+                return Response.fail("文档上传失败: " + versionResponse.getMessage());
+            }
+
             Map<String, Object> result = new HashMap<>();
             result.put("document", document);
+            result.put("initialVersion", versionResponse.getData());
             return new Response(true, "文档上传成功", result);
         } catch (Exception e) {
             return Response.fail("文档上传失败: " + e.getMessage());
@@ -117,7 +131,7 @@ public class DocumentService {
                                  fileName.endsWith(".css") || fileName.endsWith(".js");
 
             if (isTextFile) {
-                preview = new String(fileContent);
+                preview = new String(fileContent, java.nio.charset.StandardCharsets.UTF_8);
                 if (preview.length() > 1000) {
                     preview = preview.substring(0, 1000) + "\n... (预览截断)";
                 }
@@ -136,24 +150,31 @@ public class DocumentService {
     }
 
     public Response requestEdit(String documentId, String username) {
-        // TODO: Update Document.editingUser and editingStartTime after lock acquisition.
+        if (username == null || username.isBlank()) {
+            return Response.fail("请先登录");
+        }
+
+        Document document = DOCUMENTS.get(documentId);
+        if (document == null) {
+            return Response.fail("文档不存在");
+        }
+
         boolean locked = LOCK_SERVICE.tryLockDocument(documentId, username);
         if (!locked) {
-            return Response.fail("Request edit placeholder: document is locked.");
+            String lockOwner = LOCK_SERVICE.getLockOwner(documentId);
+            return Response.fail("文档正在被 " + lockOwner + " 编辑");
         }
-        Document document = DOCUMENTS.get(documentId);
-        if (document != null) {
-            document.setEditingUser(username);
-            document.setEditingStartTime(LocalDateTime.now());
-        }
-        return Response.ok("Request edit placeholder: lock acquired.");
+        document.setEditingUser(username);
+        document.setEditingStartTime(LocalDateTime.now());
+        return new Response(true, "编辑权限申请成功", document);
     }
 
     public Response saveDocument(Request request) {
         String username = request.getUsername();
         String documentId = request.getDocumentId();
 
-        if (!LOCK_SERVICE.getLockOwner(documentId).equals(username)) {
+        String lockOwner = LOCK_SERVICE.getLockOwner(documentId);
+        if (username == null || !username.equals(lockOwner)) {
             return Response.fail("您没有该文档的编辑权限");
         }
 
@@ -163,30 +184,96 @@ public class DocumentService {
         }
 
         Object payload = request.getPayload();
-        if (!(payload instanceof byte[])) {
+        byte[] fileContent;
+        String comment = "编辑保存版本";
+        if (payload instanceof byte[] bytes) {
+            fileContent = bytes;
+        } else if (payload instanceof Map<?, ?> saveData && saveData.get("fileContent") instanceof byte[] bytes) {
+            fileContent = bytes;
+            Object commentValue = saveData.get("comment");
+            if (commentValue instanceof String text) {
+                comment = text;
+            }
+        } else {
             return Response.fail("保存请求格式错误");
         }
-
-        byte[] fileContent = (byte[]) payload;
 
         try {
             fileStorage.saveFile(document.getCurrentPath(), fileContent);
             document.setLastModifiedTime(LocalDateTime.now());
-            return new Response(true, "文档保存成功", document);
+
+            Response versionResponse = VERSION_SERVICE.createEditVersion(
+                    documentId,
+                    document.getFileName(),
+                    username,
+                    document.getCurrentPath(),
+                    comment
+            );
+            if (!versionResponse.isSuccess()) {
+                return Response.fail("文档保存失败: " + versionResponse.getMessage());
+            }
+
+            Map<String, Object> result = new HashMap<>();
+            result.put("document", document);
+            result.put("editVersion", versionResponse.getData());
+            return new Response(true, "文档保存成功", result);
         } catch (Exception e) {
             return Response.fail("文档保存失败: " + e.getMessage());
         }
     }
 
     public Response releaseEdit(String documentId, String username) {
-        // TODO: Clear document editing metadata and notify waiting clients if needed.
-        LOCK_SERVICE.unlockDocument(documentId, username);
         Document document = DOCUMENTS.get(documentId);
-        if (document != null && username != null && username.equals(document.getEditingUser())) {
+        if (document == null) {
+            return Response.fail("文档不存在");
+        }
+
+        if (!LOCK_SERVICE.unlockDocument(documentId, username)) {
+            return Response.fail("您不是该文档的编辑用户，无法释放编辑权限");
+        }
+
+        if (username != null && username.equals(document.getEditingUser())) {
             document.setEditingUser(null);
             document.setEditingStartTime(null);
         }
-        return Response.ok("Release edit placeholder.");
+        return new Response(true, "编辑权限已释放", document);
+    }
+
+    public Response rollbackDocumentToVersion(Request request) {
+        String username = request.getUsername();
+        String documentId = request.getDocumentId();
+        String versionId = String.valueOf(request.getPayload());
+
+        String lockOwner = LOCK_SERVICE.getLockOwner(documentId);
+        if (username == null || !username.equals(lockOwner)) {
+            return Response.fail("回滚版本前请先申请该文档的编辑权限");
+        }
+
+        Document document = DOCUMENTS.get(documentId);
+        if (document == null) {
+            return Response.fail("文档不存在");
+        }
+
+        Response rollbackResponse = VERSION_SERVICE.rollbackToVersion(document, versionId, username);
+        if (rollbackResponse.isSuccess()) {
+            document.setLastModifiedTime(LocalDateTime.now());
+        }
+        return rollbackResponse;
+    }
+
+    public int releaseLocksHeldBy(String username) {
+        if (username == null || username.isBlank()) {
+            return 0;
+        }
+        List<String> released = LOCK_SERVICE.releaseAllLocksHeldBy(username);
+        for (String documentId : released) {
+            Document document = DOCUMENTS.get(documentId);
+            if (document != null && username.equals(document.getEditingUser())) {
+                document.setEditingUser(null);
+                document.setEditingStartTime(null);
+            }
+        }
+        return released.size();
     }
 
     public boolean isEditing(String documentId) {
