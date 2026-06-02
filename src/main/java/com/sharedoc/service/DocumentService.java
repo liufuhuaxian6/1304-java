@@ -27,19 +27,10 @@ public class DocumentService {
 
     public Response listDocuments() {
         List<Document> documents = new ArrayList<>(DOCUMENTS.values());
-        List<Map<String, Object>> documentInfoList = new ArrayList<>();
         for (Document doc : documents) {
-            Map<String, Object> docInfo = new HashMap<>();
-            docInfo.put("documentId", doc.getDocumentId());
-            docInfo.put("fileName", doc.getFileName());
-            docInfo.put("owner", doc.getOwner());
-            docInfo.put("uploadTime", doc.getUploadTime());
-            docInfo.put("lastModifiedTime", doc.getLastModifiedTime());
-            docInfo.put("isEditing", LOCK_SERVICE.isLocked(doc.getDocumentId()));
-            docInfo.put("editingUser", LOCK_SERVICE.getLockOwner(doc.getDocumentId()));
-            documentInfoList.add(docInfo);
+            syncDocumentEditingState(doc);
         }
-        return new Response(true, "文档列表获取成功", documentInfoList);
+        return new Response(true, "文档列表获取成功", documents);
     }
 
     public Response uploadDocument(Request request) {
@@ -136,30 +127,40 @@ public class DocumentService {
     }
 
     public Response requestEdit(String documentId, String username) {
-        // TODO: Update Document.editingUser and editingStartTime after lock acquisition.
+        if (documentId == null || documentId.isBlank()) {
+            return Response.fail("文档 ID 不能为空");
+        }
+        if (username == null || username.isBlank()) {
+            return Response.fail("请先登录");
+        }
+
+        Document document = DOCUMENTS.get(documentId);
+        if (document == null) {
+            return Response.fail("文档不存在");
+        }
+
         boolean locked = LOCK_SERVICE.tryLockDocument(documentId, username);
         if (!locked) {
-            return Response.fail("Request edit placeholder: document is locked.");
+            return Response.fail("文档正在被其他用户编辑");
         }
-        Document document = DOCUMENTS.get(documentId);
-        if (document != null) {
-            document.setEditingUser(username);
-            document.setEditingStartTime(LocalDateTime.now());
-        }
-        return Response.ok("Request edit placeholder: lock acquired.");
+
+        document.setEditingUser(username);
+        document.setEditingStartTime(LocalDateTime.now());
+        return Response.ok("编辑权限申请成功");
     }
 
     public Response saveDocument(Request request) {
         String username = request.getUsername();
         String documentId = request.getDocumentId();
 
-        if (!LOCK_SERVICE.getLockOwner(documentId).equals(username)) {
-            return Response.fail("您没有该文档的编辑权限");
-        }
-
         Document document = DOCUMENTS.get(documentId);
         if (document == null) {
             return Response.fail("文档不存在");
+        }
+
+        String lockOwner = LOCK_SERVICE.getLockOwner(documentId);
+        if (lockOwner == null || !lockOwner.equals(username)) {
+            return Response.fail("您没有该文档的编辑权限");
         }
 
         Object payload = request.getPayload();
@@ -179,14 +180,20 @@ public class DocumentService {
     }
 
     public Response releaseEdit(String documentId, String username) {
-        // TODO: Clear document editing metadata and notify waiting clients if needed.
-        LOCK_SERVICE.unlockDocument(documentId, username);
         Document document = DOCUMENTS.get(documentId);
-        if (document != null && username != null && username.equals(document.getEditingUser())) {
-            document.setEditingUser(null);
-            document.setEditingStartTime(null);
+        if (document == null) {
+            return Response.fail("文档不存在");
         }
-        return Response.ok("Release edit placeholder.");
+
+        String lockOwner = LOCK_SERVICE.getLockOwner(documentId);
+        if (lockOwner == null || username == null || !username.equals(lockOwner)) {
+            return Response.fail("当前用户未持有该文档的编辑权限");
+        }
+
+        LOCK_SERVICE.unlockDocument(documentId, username);
+        document.setEditingUser(null);
+        document.setEditingStartTime(null);
+        return Response.ok("编辑权限已释放");
     }
 
     public boolean isEditing(String documentId) {
@@ -197,6 +204,34 @@ public class DocumentService {
     public String getEditingUser(String documentId) {
         // TODO: Return null or a user display name according to later UI requirements.
         return LOCK_SERVICE.getLockOwner(documentId);
+    }
+
+    public void releaseAllEditsByUser(String username) {
+        if (username == null || username.isBlank()) {
+            return;
+        }
+
+        for (Document document : DOCUMENTS.values()) {
+            if (username.equals(LOCK_SERVICE.getLockOwner(document.getDocumentId()))) {
+                LOCK_SERVICE.unlockDocument(document.getDocumentId(), username);
+                document.setEditingUser(null);
+                document.setEditingStartTime(null);
+            }
+        }
+    }
+
+    private void syncDocumentEditingState(Document document) {
+        String lockOwner = LOCK_SERVICE.getLockOwner(document.getDocumentId());
+        if (lockOwner == null) {
+            document.setEditingUser(null);
+            document.setEditingStartTime(null);
+            return;
+        }
+
+        if (!lockOwner.equals(document.getEditingUser())) {
+            document.setEditingUser(lockOwner);
+            document.setEditingStartTime(null);
+        }
     }
 
     private boolean isAllowedFileType(String fileName) {

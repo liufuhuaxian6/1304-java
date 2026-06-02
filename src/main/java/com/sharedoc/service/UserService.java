@@ -14,26 +14,49 @@ import java.util.concurrent.ConcurrentHashMap;
 public class UserService {
     private static final Map<String, User> USERS = new ConcurrentHashMap<>();
     private static final Map<String, User> ONLINE_USERS = new ConcurrentHashMap<>();
+    private final DocumentService documentService;
 
     static {
         USERS.put("admin", new User("U-ADMIN", "admin", "123456", "ADMIN"));
         USERS.put("user", new User("U-DEMO", "user", "123456", "USER"));
     }
 
+    public UserService() {
+        this(new DocumentService());
+    }
+
+    public UserService(DocumentService documentService) {
+        this.documentService = documentService;
+    }
+
     public Response login(String username, String password) {
-        // TODO: Validate username/password, session state, and role permissions.
+        if (username == null || username.isBlank()) {
+            return Response.fail("用户名不能为空");
+        }
+        if (password == null || password.isBlank()) {
+            return Response.fail("密码不能为空");
+        }
+
         User user = USERS.get(username);
         if (user == null) {
-            return Response.fail("Login placeholder: user not found.");
+            return Response.fail("用户不存在");
         }
+        if (!password.equals(user.getPassword())) {
+            return Response.fail("密码错误");
+        }
+
         ONLINE_USERS.put(username, user);
-        return Response.ok("Login placeholder: success.");
+        return Response.ok("登录成功");
     }
 
     public Response logout(String username) {
-        // TODO: Release edit locks held by this user during logout.
+        if (username == null || username.isBlank()) {
+            return Response.fail("用户名不能为空");
+        }
+
         ONLINE_USERS.remove(username);
-        return Response.ok("Logout placeholder: success.");
+        documentService.releaseAllEditsByUser(username);
+        return Response.ok("登出成功");
     }
 
     public Response register(String username, String password, String role) {
