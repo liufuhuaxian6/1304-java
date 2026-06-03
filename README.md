@@ -2,9 +2,9 @@
 
 ## 1. 项目简介
 
-本项目是一个 Java 课程大作业基础框架，目标是搭建一个基于 Java Socket 和多线程的共享文档管理与版本控制系统。系统采用服务器端与控制台客户端分离的结构，支持多个客户端同时连接服务器，并预留文档上传、下载、查看、申请编辑权限、保存修改、历史版本管理等功能接口。
+本项目是一个基于 Java Socket 和多线程的共享文档管理与版本控制系统。系统采用服务器端与客户端分离的结构，支持多个客户端同时连接服务器，已实现文档上传、下载、在线查看、申请编辑权限、保存修改、历史版本管理等功能。
 
-当前阶段只提供项目基础框架，不实现真实上传、下载、编辑、版本保存、数据库连接或多人实时协同编辑逻辑。代码中的业务方法以方法签名、占位返回和 TODO 注释为主，便于后续四人小组分工开发。
+核心业务已落地：登录登出、文档上传/下载/在线预览、编辑锁（同一文档同一时刻仅一人可编辑）、保存、历史版本生成/列表/下载/回滚。除控制台客户端外，服务器还提供基于 Javalin 的 HTTP REST API 与一个简易 Web 前端。当前以内存集合 + 本地文件系统作为存储，未接入数据库，用户数据为内存模拟。
 
 ## 2. 项目目标
 
@@ -42,11 +42,10 @@
 ### 文档管理模块
 
 - 文档列表
-- 文档上传接口预留
-- 文档下载接口预留
-- 文档只读查看接口预留
-- 文档保存接口预留
-- 当前阶段不处理真实文件内容
+- 文档上传（保存到 `data/documents`）
+- 文档下载（返回文件字节）
+- 文档只读查看（文本预览，超长截断）
+- 文档保存（需持有编辑锁）
 
 ### 编辑权限模块
 
@@ -58,11 +57,11 @@
 
 ### 版本管理模块
 
-- 上传文档时生成初始版本接口预留
-- 保存文档时生成新版本接口预留
-- 查看历史版本接口预留
-- 下载历史版本接口预留
-- 版本回滚接口预留，当前暂不实现
+- 上传文档时生成初始版本
+- 保存文档时生成新版本
+- 查看历史版本列表
+- 下载历史版本
+- 版本回滚（回滚前需持有编辑锁，回滚会追加一条新版本记录）
 
 ### 客户端模块
 
@@ -97,16 +96,16 @@
 - 版本文件路径 `versionPath`
 - 备注信息 `comment`
 
-`VersionService` 负责版本元数据管理，`VersionStorage` 负责版本文件路径构建和版本文件存储接口预留。当前阶段只保留结构，后续实现时可在上传和保存时复制文件并追加版本记录。
+`VersionService` 负责版本元数据管理，`VersionStorage` 负责版本文件路径构建与版本文件复制存储。上传与保存时会把当前文件复制为一份版本快照并追加版本记录；回滚时再将指定版本快照还原为当前文件，并生成一条回滚版本记录。
 
 ## 7. 上传下载设计
 
-当前阶段上传下载只保留方法结构：
+上传下载已实现真实文件读写：
 
-- 客户端后续读取本地文件字节，封装到 `Request.payload`。
-- 服务器端后续通过 `FileStorage.saveFile` 保存文件。
-- 下载当前文档时，服务器后续通过 `FileStorage.readFile` 读取字节并返回。
-- 下载历史版本时，服务器后续通过 `VersionStorage.readVersionFile` 读取指定版本文件。
+- 客户端读取本地文件字节，封装到 `Request.payload`。
+- 服务器端通过 `FileStorage.saveFile` 保存文件。
+- 下载当前文档时，服务器通过 `FileStorage.readFile` 读取字节并返回。
+- 下载历史版本时，服务器通过 `VersionStorage.readVersionFile` 读取指定版本文件。
 - 文件默认目录为 `data/documents`，版本默认目录为 `data/versions`。
 
 ## 8. 项目目录结构
@@ -137,6 +136,7 @@
                     │   └── User.java
                     ├── server
                     │   ├── ClientHandler.java
+                    │   ├── HttpApiServer.java
                     │   ├── ServerConfig.java
                     │   └── ServerMain.java
                     ├── service
@@ -184,10 +184,30 @@ java -cp target/classes com.sharedoc.client.ClientMain
 
 默认测试用户：
 
-- 用户名：`admin`，密码占位：`123456`
-- 用户名：`user`，密码占位：`123456`
+- 用户名：`admin`，密码：`123456`
+- 用户名：`user`，密码：`123456`
 
-说明：当前登录逻辑仍是占位实现，客户端菜单中默认发送 `123456` 作为密码，后续可补全密码输入与校验。
+说明：登录已实现真实密码校验，控制台客户端会提示输入密码；以上为内置测试用户的默认密码。
+
+### 启动 HTTP API 与 Web 前端
+
+`ServerMain` 在启动 Socket 服务（端口 `8889`）的同时，会启动一个 HTTP REST API（端口 `8082`）：
+
+```bash
+java -cp target/classes com.sharedoc.server.ServerMain
+```
+
+随后用浏览器打开 `frontend/index.html` 即可使用 Web 前端（登录、文档列表、上传、预览、下载、申请/释放编辑、保存）。Web 前端默认请求 `http://localhost:8082`。
+
+主要 HTTP 接口：
+
+- `POST /api/v1/auth/login`、`POST /api/v1/auth/register`、`POST /api/v1/auth/logout`、`GET /api/v1/auth/me`
+- `GET /api/v1/documents`、`POST /api/v1/documents`（上传）
+- `GET /api/v1/documents/{id}/preview`、`GET /api/v1/documents/{id}/download`
+- `POST` / `DELETE /api/v1/documents/{id}/lock`、`PUT /api/v1/documents/{id}/content`
+- `GET /api/v1/documents/{id}/versions`、`GET /api/v1/documents/{id}/versions/{versionId}/download`、`POST /api/v1/documents/{id}/versions/{versionId}/rollback`
+
+接口契约详见 [frontend-api-design.md](./frontend-api-design.md)。
 
 ## 10. 后续开发计划
 
@@ -256,9 +276,10 @@ java -cp target/classes com.sharedoc.client.ClientMain
 
 ## 12. 当前阶段说明
 
-- 当前代码只是基础框架。
-- 具体业务逻辑将在后续逐步实现。
-- 当前项目可以使用 Maven 编译运行。
-- 服务器和客户端可以分别启动。
-- 通信协议暂时使用 Java Serializable 对象流，后续可以替换为 JSON 或自定义文本协议。
-- 后续可以扩展图形界面 Swing/JavaFX 或数据库存储。
+- 核心业务（登录登出、上传/下载/预览、编辑锁、保存、版本生成/列表/下载/回滚）已实现。
+- 提供两种接入方式：控制台 Socket 客户端，以及基于 Javalin 的 HTTP REST API + 简易 Web 前端。
+- Socket 通信使用 Java Serializable 对象流；HTTP 接口使用 JSON。
+- 用户注册已实现（服务层 `UserService.register` 与 HTTP `POST /api/v1/auth/register`），但用户数据仍为内存模拟，未持久化。
+- 数据存放于内存集合与本地文件系统，未接入数据库。
+- 已包含 JUnit 单元测试（服务层与请求分发）。
+- 后续可扩展：数据库存储、图形界面，以及 Web 前端的历史版本管理页面。

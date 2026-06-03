@@ -57,6 +57,24 @@ class UserServiceTest {
         assertTrue(otherUserLockResponse.isSuccess());
     }
 
+    @Test
+    void registerCreatesLoginableUserAndRejectsDuplicate() {
+        Response registered = userService.register("tester-reg", "pass123", "USER");
+        assertTrue(registered.isSuccess());
+        assertEquals("注册成功", registered.getMessage());
+
+        Response login = userService.login("tester-reg", "pass123");
+        assertTrue(login.isSuccess());
+
+        Response duplicate = userService.register("tester-reg", "other", "USER");
+        assertTrue(!duplicate.isSuccess());
+        assertEquals("用户名已存在", duplicate.getMessage());
+
+        Response blankPassword = userService.register("tester-reg-2", "  ", "USER");
+        assertTrue(!blankPassword.isSuccess());
+        assertEquals("密码不能为空", blankPassword.getMessage());
+    }
+
     private Document uploadDocument(String username, String fileName, String content) {
         Map<String, Object> payload = new HashMap<>();
         payload.put("fileName", fileName);

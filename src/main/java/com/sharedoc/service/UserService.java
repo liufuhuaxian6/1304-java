@@ -62,9 +62,19 @@ public class UserService {
     }
 
     public Response register(String username, String password, String role) {
-        // TODO: Add duplicate checks and persistence when user module is implemented.
-        User user = new User(IdGenerator.nextUserId(), username, password, role);
+        if (username == null || username.isBlank()) {
+            return Response.fail("用户名不能为空");
+        }
+        if (password == null || password.isBlank()) {
+            return Response.fail("密码不能为空");
+        }
+        if (USERS.containsKey(username)) {
+            return Response.fail("用户名已存在");
+        }
+
+        String userRole = (role == null || role.isBlank()) ? "USER" : role;
+        User user = new User(IdGenerator.nextUserId(), username, password, userRole);
         USERS.put(username, user);
-        return Response.ok("Register placeholder: success.");
+        return Response.ok("注册成功");
     }
 }

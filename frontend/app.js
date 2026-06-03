@@ -18,6 +18,11 @@ createApp({
         const isTruncated = ref(false);
         const hasEditLock = ref(false);
 
+        // Version management state
+        const showVersions = ref(false);
+        const versions = ref([]);
+        const versionDoc = ref(null);
+
         // Utility: Show toast
         const showToast = (msg) => {
             toast.value = msg;
@@ -203,6 +208,60 @@ createApp({
             fetchDocuments();
         };
 
+        // Version management methods
+        const opLabel = (op) => ({
+            UPLOAD: '上传', EDIT: '编辑', ROLLBACK: '回滚', DOWNLOAD: '下载', VIEW: '查看'
+        }[op] || op || '');
+
+        const openVersions = async (doc) => {
+            if (!doc) return;
+            versionDoc.value = { documentId: doc.documentId, fileName: doc.fileName };
+            versions.value = [];
+            showVersions.value = true;
+            try {
+                const data = await apiCall(`/documents/${doc.documentId}/versions`);
+                versions.value = data || [];
+            } catch (err) {}
+        };
+
+        const closeVersions = () => {
+            showVersions.value = false;
+            versionDoc.value = null;
+            versions.value = [];
+        };
+
+        const downloadVersion = async (v) => {
+            try {
+                const res = await apiCall(`/documents/${versionDoc.value.documentId}/versions/${v.versionId}/download`, { isDownload: true });
+                const blob = await res.blob();
+                const url = window.URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = `${v.versionId}-${v.fileName}`;
+                document.body.appendChild(a);
+                a.click();
+                window.URL.revokeObjectURL(url);
+                document.body.removeChild(a);
+                showToast('版本下载成功');
+            } catch (err) {}
+        };
+
+        const rollbackVersion = async (v) => {
+            if (!confirm(`确认将文档回滚到版本 ${v.versionId} 吗？此操作会生成一条新的回滚版本。`)) return;
+            const docId = versionDoc.value.documentId;
+            const fileName = versionDoc.value.fileName;
+            try {
+                await apiCall(`/documents/${docId}/versions/${v.versionId}/rollback`, { method: 'POST' });
+                showToast('版本回滚成功');
+                const data = await apiCall(`/documents/${docId}/versions`);
+                versions.value = data || [];
+                if (currentView.value === 'editor' && currentDocument.value && currentDocument.value.documentId === docId) {
+                    await viewDocument({ documentId: docId, fileName });
+                }
+                fetchDocuments();
+            } catch (err) {}
+        };
+
         onMounted(() => {
             checkAuth();
         });
@@ -210,8 +269,10 @@ createApp({
         return {
             user, loginForm, error, toast, currentView, documents,
             currentDocument, documentContent, isTextFile, isTruncated, hasEditLock,
+            showVersions, versions, versionDoc,
             login, logout, fetchDocuments, uploadDocument, downloadDocument,
-            viewDocument, requestEditLock, releaseEditLock, saveDocument, backToList
+            viewDocument, requestEditLock, releaseEditLock, saveDocument, backToList,
+            opLabel, openVersions, closeVersions, downloadVersion, rollbackVersion
         };
     }
 }).mount('#app');

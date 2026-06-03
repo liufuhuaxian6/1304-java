@@ -1,16 +1,23 @@
 package com.sharedoc.server;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.SerializationFeature;
+import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
 import com.google.gson.Gson;
 import com.sharedoc.model.Document;
+import com.sharedoc.model.DocumentVersion;
 import com.sharedoc.model.User;
 import com.sharedoc.service.DocumentService;
 import com.sharedoc.service.UserService;
 import com.sharedoc.service.VersionService;
+import com.sharedoc.util.DateTimeUtil;
 import io.javalin.Javalin;
 import io.javalin.http.Context;
 import io.javalin.http.UploadedFile;
+import io.javalin.json.JavalinJackson;
 
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -33,7 +40,12 @@ public class HttpApiServer {
     }
 
     public void start(int port) {
+        ObjectMapper jacksonMapper = new ObjectMapper()
+                .registerModule(new JavaTimeModule())
+                .disable(SerializationFeature.WRITE_DATES_AS_TIMESTAMPS);
+
         Javalin app = Javalin.create(config -> {
+            config.jsonMapper(new JavalinJackson(jacksonMapper));
             config.plugins.enableCors(cors -> {
                 cors.add(it -> it.anyHost());
             });
@@ -118,6 +130,28 @@ public class HttpApiServer {
             ctx.json(success("获取当前用户成功", user));
         });
 
+        // 7.3.1 Register
+        app.post("/api/v1/auth/register", ctx -> {
+            Map<String, String> body = gson.fromJson(ctx.body(), Map.class);
+            if (body == null) {
+                ctx.status(400).json(error("BAD_REQUEST", "请求体不能为空"));
+                return;
+            }
+            String username = body.get("username");
+            String password = body.get("password");
+            String role = body.get("role");
+
+            com.sharedoc.model.Response res = userService.register(username, password, role);
+            if (res.isSuccess()) {
+                Map<String, Object> data = new HashMap<>();
+                data.put("username", username);
+                data.put("role", (role == null || role.isBlank()) ? "USER" : role);
+                ctx.status(201).json(success("注册成功", data));
+            } else {
+                ctx.status(400).json(error("REGISTER_FAILED", res.getMessage()));
+            }
+        });
+
         // 7.4 List documents
         app.get("/api/v1/documents", ctx -> {
             com.sharedoc.model.Response res = documentService.listDocuments();
@@ -154,7 +188,8 @@ public class HttpApiServer {
                     ctx.status(400).json(error("BAD_REQUEST", res.getMessage()));
                 }
             } catch (Exception e) {
-                ctx.status(500).json(error("INTERNAL_ERROR", "Failed to upload file"));
+                e.printStackTrace();
+                ctx.status(500).json(error("INTERNAL_ERROR", "Failed to upload file: " + e.getMessage()));
             }
         });
 
@@ -241,9 +276,66 @@ public class HttpApiServer {
             }
         });
         
-        // 7.11 List versions (mock)
+        // 7.11 List versions
         app.get("/api/v1/documents/{documentId}/versions", ctx -> {
-            ctx.json(success("版本列表获取成功", List.of()));
+            String docId = ctx.pathParam("documentId");
+            com.sharedoc.model.Response res = versionService.listVersions(docId);
+            if (res.isSuccess()) {
+                @SuppressWarnings("unchecked")
+                List<DocumentVersion> versions = (List<DocumentVersion>) res.getData();
+                List<Map<String, Object>> data = new ArrayList<>();
+                for (DocumentVersion v : versions) {
+                    Map<String, Object> item = new HashMap<>();
+                    item.put("versionId", v.getVersionId());
+                    item.put("documentId", v.getDocumentId());
+                    item.put("fileName", v.getFileName());
+                    item.put("editor", v.getEditor());
+                    item.put("operationType", v.getOperationType() == null ? null : v.getOperationType().name());
+                    item.put("editTime", DateTimeUtil.format(v.getEditTime()));
+                    item.put("comment", v.getComment());
+                    data.add(item);
+                }
+                ctx.json(success("版本列表获取成功", data));
+            } else {
+                ctx.status(400).json(error("BAD_REQUEST", res.getMessage()));
+            }
+        });
+
+        // 7.12 Download a historical version
+        app.get("/api/v1/documents/{documentId}/versions/{versionId}/download", ctx -> {
+            String versionId = ctx.pathParam("versionId");
+            com.sharedoc.model.Response res = versionService.downloadVersion(versionId);
+            if (res.isSuccess()) {
+                Map<String, Object> result = (Map<String, Object>) res.getData();
+                DocumentVersion version = (DocumentVersion) result.get("version");
+                byte[] content = (byte[]) result.get("fileContent");
+                ctx.header("Content-Disposition", "attachment; filename=\"" + version.getFileName() + "\"");
+                ctx.header("X-Version-Id", version.getVersionId());
+                ctx.contentType("application/octet-stream");
+                ctx.result(content);
+            } else {
+                ctx.status(404).json(error("VERSION_NOT_FOUND", res.getMessage()));
+            }
+        });
+
+        // 7.13 Rollback to a historical version (requires holding the edit lock)
+        app.post("/api/v1/documents/{documentId}/versions/{versionId}/rollback", ctx -> {
+            String docId = ctx.pathParam("documentId");
+            String versionId = ctx.pathParam("versionId");
+            String username = ctx.attribute("username");
+            com.sharedoc.model.Request req = new com.sharedoc.model.Request();
+            req.setType(com.sharedoc.model.RequestType.ROLLBACK_VERSION);
+            req.setUsername(username);
+            req.setDocumentId(docId);
+            req.setPayload(versionId);
+
+            com.sharedoc.model.Response res = documentService.rollbackDocumentToVersion(req);
+            if (res.isSuccess()) {
+                // Avoid serializing entities with LocalDateTime fields; the client refreshes after rollback.
+                ctx.json(success("版本回滚成功", null));
+            } else {
+                ctx.status(403).json(error("ROLLBACK_FAILED", res.getMessage()));
+            }
         });
     }
 
