@@ -28,6 +28,9 @@ target/
 .m2/
 apache-maven-*/
 
+# 本地工具链（本地 Maven 安装等）
+.tools/
+
 # Data storage
 data/
 
