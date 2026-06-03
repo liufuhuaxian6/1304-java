@@ -252,6 +252,8 @@ java -cp target/classes com.sharedoc.client.ClientMain
 
 当前成员 D 交付的客户端交接与联调说明见 [handover-D.md](./handover-D.md)。
 
+如需为后续 Web 前端开发准备接口契约，见 [frontend-api-design.md](./frontend-api-design.md)。
+
 ## 12. 当前阶段说明
 
 - 当前代码只是基础框架。

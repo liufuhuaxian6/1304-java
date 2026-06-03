@@ -27,6 +27,11 @@ public class ServerMain {
         DocumentService documentService = new DocumentService();
         UserService userService = new UserService(documentService);
         VersionService versionService = new VersionService();
+        
+        // Start HTTP API Server
+        HttpApiServer apiServer = new HttpApiServer(userService, documentService, versionService);
+        apiServer.start(8082); // Changed port to 8082 to avoid conflict
+
         ExecutorService executorService = createClientExecutor();
         Runtime.getRuntime().addShutdownHook(new Thread(() -> shutdownExecutor(executorService), "server-shutdown"));
 
