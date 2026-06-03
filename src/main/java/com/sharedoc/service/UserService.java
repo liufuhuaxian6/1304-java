@@ -14,25 +14,37 @@ import java.util.concurrent.ConcurrentHashMap;
 public class UserService {
     private static final Map<String, User> USERS = new ConcurrentHashMap<>();
     private static final Map<String, User> ONLINE_USERS = new ConcurrentHashMap<>();
-
-    private final DocumentService documentService = new DocumentService();
+    private final DocumentService documentService;
 
     static {
         USERS.put("admin", new User("U-ADMIN", "admin", "123456", "ADMIN"));
         USERS.put("user", new User("U-DEMO", "user", "123456", "USER"));
     }
 
+    public UserService() {
+        this(new DocumentService());
+    }
+
+    public UserService(DocumentService documentService) {
+        this.documentService = documentService;
+    }
+
     public Response login(String username, String password) {
         if (username == null || username.isBlank()) {
             return Response.fail("用户名不能为空");
         }
+        if (password == null || password.isBlank()) {
+            return Response.fail("密码不能为空");
+        }
+
         User user = USERS.get(username);
         if (user == null) {
             return Response.fail("用户不存在");
         }
-        if (password == null || !password.equals(user.getPassword())) {
+        if (!password.equals(user.getPassword())) {
             return Response.fail("密码错误");
         }
+
         ONLINE_USERS.put(username, user);
         return Response.ok("登录成功");
     }

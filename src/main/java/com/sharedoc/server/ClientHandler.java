@@ -21,12 +21,14 @@ public class ClientHandler implements Runnable {
     private final UserService userService;
     private final DocumentService documentService;
     private final VersionService versionService;
+    private String currentUsername;
 
-    public ClientHandler(Socket socket) {
+    public ClientHandler(Socket socket, UserService userService,
+                         DocumentService documentService, VersionService versionService) {
         this.socket = socket;
-        this.userService = new UserService();
-        this.documentService = new DocumentService();
-        this.versionService = new VersionService();
+        this.userService = userService;
+        this.documentService = documentService;
+        this.versionService = versionService;
     }
 
     @Override
@@ -34,23 +36,38 @@ public class ClientHandler implements Runnable {
         try (ObjectOutputStream output = new ObjectOutputStream(socket.getOutputStream());
              ObjectInputStream input = new ObjectInputStream(socket.getInputStream())) {
             while (!socket.isClosed()) {
-                Object object = input.readObject();
-                if (object instanceof Request request) {
-                    Response response = handleRequest(request);
-                    output.writeObject(response);
-                    output.flush();
-                } else {
-                    output.writeObject(Response.fail("Unsupported request object."));
-                    output.flush();
+                Object object;
+                try {
+                    object = input.readObject();
+                } catch (ClassNotFoundException e) {
+                    writeResponse(output, Response.fail("Unsupported request payload class."));
+                    continue;
+                }
+
+                Response response = handleIncomingObject(object);
+                writeResponse(output, response);
+
+                if (object instanceof Request request
+                        && request.getType() == com.sharedoc.model.RequestType.LOGOUT
+                        && response.isSuccess()) {
+                    currentUsername = null;
                 }
             }
         } catch (EOFException e) {
             System.out.println("Client disconnected: " + socket.getRemoteSocketAddress());
-        } catch (IOException | ClassNotFoundException e) {
+        } catch (IOException e) {
             System.err.println("Client handler error: " + e.getMessage());
         } finally {
+            cleanupLoggedInUser();
             closeSocket();
         }
+    }
+
+    private Response handleIncomingObject(Object object) {
+        if (!(object instanceof Request request)) {
+            return Response.fail("Unsupported request object.");
+        }
+        return handleRequest(request);
     }
 
     private Response handleRequest(Request request) {
@@ -58,20 +75,69 @@ public class ClientHandler implements Runnable {
             return Response.fail("Request type is required.");
         }
 
-        return switch (request.getType()) {
-            case LOGIN -> userService.login(request.getUsername(), String.valueOf(request.getPayload()));
-            case LOGOUT -> userService.logout(request.getUsername());
-            case LIST_DOCUMENTS -> documentService.listDocuments();
-            case UPLOAD_DOCUMENT -> documentService.uploadDocument(request);
-            case DOWNLOAD_DOCUMENT -> documentService.downloadDocument(request.getDocumentId());
-            case VIEW_DOCUMENT -> documentService.viewDocument(request.getDocumentId());
-            case REQUEST_EDIT -> documentService.requestEdit(request.getDocumentId(), request.getUsername());
-            case SAVE_DOCUMENT -> documentService.saveDocument(request);
-            case RELEASE_EDIT -> documentService.releaseEdit(request.getDocumentId(), request.getUsername());
-            case LIST_VERSIONS -> versionService.listVersions(request.getDocumentId());
-            case DOWNLOAD_VERSION -> versionService.downloadVersion(String.valueOf(request.getPayload()));
-            case ROLLBACK_VERSION -> documentService.rollbackDocumentToVersion(request);
-        };
+        normalizeRequestUsername(request);
+
+        try {
+            Response response = switch (request.getType()) {
+                case LOGIN -> userService.login(request.getUsername(), extractStringPayload(request.getPayload()));
+                case LOGOUT -> userService.logout(request.getUsername());
+                case LIST_DOCUMENTS -> documentService.listDocuments();
+                case UPLOAD_DOCUMENT -> documentService.uploadDocument(request);
+                case DOWNLOAD_DOCUMENT -> documentService.downloadDocument(request.getDocumentId());
+                case VIEW_DOCUMENT -> documentService.viewDocument(request.getDocumentId());
+                case REQUEST_EDIT -> documentService.requestEdit(request.getDocumentId(), request.getUsername());
+                case SAVE_DOCUMENT -> documentService.saveDocument(request);
+                case RELEASE_EDIT -> documentService.releaseEdit(request.getDocumentId(), request.getUsername());
+                case LIST_VERSIONS -> versionService.listVersions(request.getDocumentId());
+                case DOWNLOAD_VERSION -> versionService.downloadVersion(extractStringPayload(request.getPayload()));
+                case ROLLBACK_VERSION -> documentService.rollbackDocumentToVersion(request);
+            };
+
+            if (request.getType() == com.sharedoc.model.RequestType.LOGIN && response.isSuccess()) {
+                currentUsername = request.getUsername();
+            }
+            return response;
+        } catch (RuntimeException e) {
+            return Response.fail("服务器处理请求时发生异常: " + e.getMessage());
+        }
+    }
+
+    private void normalizeRequestUsername(Request request) {
+        if (request.getType() != com.sharedoc.model.RequestType.LOGIN
+                && isBlank(request.getUsername())
+                && !isBlank(currentUsername)) {
+            request.setUsername(currentUsername);
+        }
+    }
+
+    private String extractStringPayload(Object payload) {
+        if (payload == null) {
+            return null;
+        }
+        return String.valueOf(payload);
+    }
+
+    private void writeResponse(ObjectOutputStream output, Response response) throws IOException {
+        output.writeObject(response);
+        output.flush();
+        output.reset();
+    }
+
+    private void cleanupLoggedInUser() {
+        if (isBlank(currentUsername)) {
+            return;
+        }
+        try {
+            userService.logout(currentUsername);
+        } catch (RuntimeException e) {
+            System.err.println("Failed to clean up disconnected user session: " + e.getMessage());
+        } finally {
+            currentUsername = null;
+        }
+    }
+
+    private boolean isBlank(String value) {
+        return value == null || value.isBlank();
     }
 
     private void closeSocket() {

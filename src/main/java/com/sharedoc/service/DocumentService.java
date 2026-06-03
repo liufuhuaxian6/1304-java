@@ -28,19 +28,10 @@ public class DocumentService {
 
     public Response listDocuments() {
         List<Document> documents = new ArrayList<>(DOCUMENTS.values());
-        List<Map<String, Object>> documentInfoList = new ArrayList<>();
         for (Document doc : documents) {
-            Map<String, Object> docInfo = new HashMap<>();
-            docInfo.put("documentId", doc.getDocumentId());
-            docInfo.put("fileName", doc.getFileName());
-            docInfo.put("owner", doc.getOwner());
-            docInfo.put("uploadTime", doc.getUploadTime());
-            docInfo.put("lastModifiedTime", doc.getLastModifiedTime());
-            docInfo.put("isEditing", LOCK_SERVICE.isLocked(doc.getDocumentId()));
-            docInfo.put("editingUser", LOCK_SERVICE.getLockOwner(doc.getDocumentId()));
-            documentInfoList.add(docInfo);
+            syncDocumentEditingState(doc);
         }
-        return new Response(true, "文档列表获取成功", documentInfoList);
+        return new Response(true, "文档列表获取成功", documents);
     }
 
     public Response uploadDocument(Request request) {
@@ -150,6 +141,9 @@ public class DocumentService {
     }
 
     public Response requestEdit(String documentId, String username) {
+        if (documentId == null || documentId.isBlank()) {
+            return Response.fail("文档 ID 不能为空");
+        }
         if (username == null || username.isBlank()) {
             return Response.fail("请先登录");
         }
@@ -173,14 +167,14 @@ public class DocumentService {
         String username = request.getUsername();
         String documentId = request.getDocumentId();
 
-        String lockOwner = LOCK_SERVICE.getLockOwner(documentId);
-        if (username == null || !username.equals(lockOwner)) {
-            return Response.fail("您没有该文档的编辑权限");
-        }
-
         Document document = DOCUMENTS.get(documentId);
         if (document == null) {
             return Response.fail("文档不存在");
+        }
+
+        String lockOwner = LOCK_SERVICE.getLockOwner(documentId);
+        if (lockOwner == null || !lockOwner.equals(username)) {
+            return Response.fail("您没有该文档的编辑权限");
         }
 
         Object payload = request.getPayload();
@@ -284,6 +278,34 @@ public class DocumentService {
     public String getEditingUser(String documentId) {
         // TODO: Return null or a user display name according to later UI requirements.
         return LOCK_SERVICE.getLockOwner(documentId);
+    }
+
+    public void releaseAllEditsByUser(String username) {
+        if (username == null || username.isBlank()) {
+            return;
+        }
+
+        for (Document document : DOCUMENTS.values()) {
+            if (username.equals(LOCK_SERVICE.getLockOwner(document.getDocumentId()))) {
+                LOCK_SERVICE.unlockDocument(document.getDocumentId(), username);
+                document.setEditingUser(null);
+                document.setEditingStartTime(null);
+            }
+        }
+    }
+
+    private void syncDocumentEditingState(Document document) {
+        String lockOwner = LOCK_SERVICE.getLockOwner(document.getDocumentId());
+        if (lockOwner == null) {
+            document.setEditingUser(null);
+            document.setEditingStartTime(null);
+            return;
+        }
+
+        if (!lockOwner.equals(document.getEditingUser())) {
+            document.setEditingUser(lockOwner);
+            document.setEditingStartTime(null);
+        }
     }
 
     private boolean isAllowedFileType(String fileName) {

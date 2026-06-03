@@ -1,7 +1,5 @@
 # Compiled class file
 *.class
-target/
-.tools/
 
 # Log file
 *.log
@@ -24,3 +22,19 @@ target/
 # virtual machine crash logs, see http://www.java.com/en/download/help/error_hotspot.xml
 hs_err_pid*
 replay_pid*
+
+# Maven
+target/
+.m2/
+apache-maven-*/
+
+# Data storage
+data/
+
+# IDE files
+.idea/
+*.iml
+.vscode/
+
+# data
+data/
