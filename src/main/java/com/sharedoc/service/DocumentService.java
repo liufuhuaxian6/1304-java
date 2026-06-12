@@ -3,12 +3,16 @@ package com.sharedoc.service;
 import com.sharedoc.model.ContentUpdateResult;
 import com.sharedoc.model.Document;
 import com.sharedoc.model.DocumentVersion;
+import com.sharedoc.model.ErrorCodes;
 import com.sharedoc.model.LockReleaseResult;
 import com.sharedoc.model.RangeLock;
 import com.sharedoc.model.Response;
 import com.sharedoc.server.ServerConfig;
 import com.sharedoc.storage.FileStorage;
+import com.sharedoc.util.FileNames;
 import com.sharedoc.util.IdGenerator;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
@@ -22,36 +26,45 @@ import java.util.concurrent.ConcurrentHashMap;
 /**
  * Document service.
  * Owns document metadata, range locking, and partial save workflows.
+ * All operations on one document are serialized through a per-document monitor.
  */
 public class DocumentService {
-    static final Map<String, Document> DOCUMENTS = new ConcurrentHashMap<>();
-    static final Map<String, Object> DOCUMENT_MONITORS = new ConcurrentHashMap<>();
-    private static final LockService LOCK_SERVICE = new LockService();
-    private static final VersionService VERSION_SERVICE = new VersionService();
+    private static final Logger LOGGER = LoggerFactory.getLogger(DocumentService.class);
 
+    private final Map<String, Document> documents = new ConcurrentHashMap<>();
+    private final Map<String, Object> documentMonitors = new ConcurrentHashMap<>();
     private final FileStorage fileStorage;
+    private final LockService lockService;
+    private final VersionService versionService;
 
     public DocumentService() {
-        this(new FileStorage());
+        this(new FileStorage(), new LockService(), new VersionService());
     }
 
-    DocumentService(FileStorage fileStorage) {
+    public DocumentService(FileStorage fileStorage, LockService lockService, VersionService versionService) {
         this.fileStorage = fileStorage;
+        this.lockService = lockService;
+        this.versionService = versionService;
+    }
+
+    public boolean documentExists(String documentId) {
+        return documentId != null && documents.containsKey(documentId);
     }
 
     public Response listDocuments() {
-        List<Document> documents = new ArrayList<>(DOCUMENTS.values());
-        for (Document doc : documents) {
+        List<Document> snapshot = new ArrayList<>();
+        for (Document doc : documents.values()) {
             synchronized (documentMonitor(doc.getDocumentId())) {
                 syncDocumentEditingState(doc);
+                snapshot.add(copyOf(doc));
             }
         }
-        return new Response(true, "文档列表获取成功", documents);
+        return new Response(true, "文档列表获取成功", snapshot);
     }
 
     public Response uploadDocument(String username, String fileName, byte[] fileContent) {
         if (username == null || username.isBlank()) {
-            return Response.fail("请先登录");
+            return Response.fail(ErrorCodes.AUTH_REQUIRED, "请先登录");
         }
         if (fileName == null || fileName.isBlank()) {
             return Response.fail("文件名不能为空");
@@ -59,28 +72,35 @@ public class DocumentService {
         if (fileContent == null || fileContent.length == 0) {
             return Response.fail("文件内容不能为空");
         }
-        if (!isAllowedFileType(fileName)) {
-            return Response.fail("不支持的文件类型，请上传代码、网页样式、配置数据、脚本命令、文档标记或工程文件");
+        if (fileContent.length > ServerConfig.MAX_UPLOAD_BYTES) {
+            return Response.fail(ErrorCodes.FILE_TOO_LARGE,
+                    "文件大小超过限制（最大 " + (ServerConfig.MAX_UPLOAD_BYTES / 1024 / 1024) + " MB）");
+        }
+
+        String safeFileName = FileNames.sanitize(fileName);
+        if (!isAllowedFileType(safeFileName)) {
+            return Response.fail(ErrorCodes.UNSUPPORTED_FILE_TYPE,
+                    "不支持的文件类型，请上传代码、网页样式、配置数据、脚本命令、文档标记或工程文件");
         }
 
         String documentId = IdGenerator.nextDocumentId();
-        String storagePath = Path.of(ServerConfig.DOCUMENT_STORAGE_PATH, documentId + "_" + fileName).toString();
+        String storagePath = Path.of(ServerConfig.DOCUMENT_STORAGE_PATH, documentId + "_" + safeFileName).toString();
 
         try {
             fileStorage.saveFile(storagePath, fileContent);
-            Document document = new Document(documentId, fileName, username, storagePath);
-            DOCUMENTS.put(documentId, document);
+            Document document = new Document(documentId, safeFileName, username, storagePath);
+            documents.put(documentId, document);
 
-            Response versionResponse = VERSION_SERVICE.createInitialVersion(
+            Response versionResponse = versionService.createInitialVersion(
                     documentId,
-                    fileName,
+                    safeFileName,
                     username,
                     storagePath
             );
             if (!versionResponse.isSuccess()) {
-                DOCUMENTS.remove(documentId);
+                documents.remove(documentId);
                 fileStorage.deleteFile(storagePath);
-                return Response.fail("文档上传失败: " + versionResponse.getMessage());
+                return Response.fail(versionResponse.getCode(), "文档上传失败: " + versionResponse.getMessage());
             }
 
             Map<String, Object> result = new HashMap<>();
@@ -88,14 +108,15 @@ public class DocumentService {
             result.put("initialVersion", versionResponse.getData());
             return new Response(true, "文档上传成功", result);
         } catch (Exception e) {
-            return Response.fail("文档上传失败: " + e.getMessage());
+            LOGGER.error("Upload failed, fileName={}", safeFileName, e);
+            return Response.fail(ErrorCodes.INTERNAL_ERROR, "文档上传失败");
         }
     }
 
     public Response downloadDocument(String documentId) {
-        Document document = DOCUMENTS.get(documentId);
+        Document document = documents.get(documentId);
         if (document == null) {
-            return Response.fail("文档不存在");
+            return Response.fail(ErrorCodes.DOCUMENT_NOT_FOUND, "文档不存在");
         }
 
         synchronized (documentMonitor(documentId)) {
@@ -106,15 +127,16 @@ public class DocumentService {
                 result.put("fileContent", fileContent);
                 return new Response(true, "文档下载成功", result);
             } catch (Exception e) {
-                return Response.fail("文档下载失败: " + e.getMessage());
+                LOGGER.error("Download failed, documentId={}", documentId, e);
+                return Response.fail(ErrorCodes.INTERNAL_ERROR, "文档下载失败");
             }
         }
     }
 
     public Response viewDocument(String documentId) {
-        Document document = DOCUMENTS.get(documentId);
+        Document document = documents.get(documentId);
         if (document == null) {
-            return Response.fail("文档不存在");
+            return Response.fail(ErrorCodes.DOCUMENT_NOT_FOUND, "文档不存在");
         }
 
         synchronized (documentMonitor(documentId)) {
@@ -144,15 +166,16 @@ public class DocumentService {
                 result.put("isTextFile", isTextFile);
                 return new Response(true, "文档查看成功", result);
             } catch (Exception e) {
-                return Response.fail("文档查看失败: " + e.getMessage());
+                LOGGER.error("View failed, documentId={}", documentId, e);
+                return Response.fail(ErrorCodes.INTERNAL_ERROR, "文档查看失败");
             }
         }
     }
 
     public Response getDocumentContent(String documentId) {
-        Document document = DOCUMENTS.get(documentId);
+        Document document = documents.get(documentId);
         if (document == null) {
-            return Response.fail("文档不存在");
+            return Response.fail(ErrorCodes.DOCUMENT_NOT_FOUND, "文档不存在");
         }
 
         synchronized (documentMonitor(documentId)) {
@@ -164,10 +187,11 @@ public class DocumentService {
                 result.put("document", document);
                 result.put("contentText", content);
                 result.put("revision", document.getRevision());
-                result.put("activeLocks", LOCK_SERVICE.getVisibleLocks(documentId));
+                result.put("activeLocks", lockService.getVisibleLocks(documentId));
                 return new Response(true, "文档内容获取成功", result);
             } catch (Exception e) {
-                return Response.fail("文档内容获取失败: " + e.getMessage());
+                LOGGER.error("Get content failed, documentId={}", documentId, e);
+                return Response.fail(ErrorCodes.INTERNAL_ERROR, "文档内容获取失败");
             }
         }
     }
@@ -177,58 +201,62 @@ public class DocumentService {
             return Response.fail("文档 ID 不能为空");
         }
         if (username == null || username.isBlank()) {
-            return Response.fail("请先登录");
+            return Response.fail(ErrorCodes.AUTH_REQUIRED, "请先登录");
         }
 
-        Document document = DOCUMENTS.get(documentId);
+        Document document = documents.get(documentId);
         if (document == null) {
-            return Response.fail("文档不存在");
+            return Response.fail(ErrorCodes.DOCUMENT_NOT_FOUND, "文档不存在");
         }
 
         synchronized (documentMonitor(documentId)) {
-            if (revision != document.getRevision()) {
-                return Response.fail("文档版本已更新，请刷新后重试");
-            }
-            int maxLength = getDocumentLength(document);
-            if (start < 0 || end < start || end > maxLength) {
-                return Response.fail("锁定区间超出文档范围");
-            }
-
-            RangeLock lock = LOCK_SERVICE.tryLockRange(documentId, username, revision, start, end);
-            if (lock == null) {
-                RangeLock ownLock = LOCK_SERVICE.getLockByOwner(documentId, username);
-                if (ownLock != null) {
-                    return Response.fail("您已在该文档持有一个编辑区间");
+            try {
+                if (revision != document.getRevision()) {
+                    return Response.fail(ErrorCodes.REVISION_STALE, "文档版本已更新，请刷新后重试");
+                }
+                int maxLength = getDocumentLength(document);
+                if (start < 0 || end < start || end > maxLength) {
+                    return Response.fail("锁定区间超出文档范围");
                 }
 
-                return Response.fail("区间锁申请失败");
-            }
+                RangeLock lock = lockService.tryLockRange(documentId, username, revision, start, end);
+                if (lock == null) {
+                    RangeLock ownLock = lockService.getLockByOwner(documentId, username);
+                    if (ownLock != null) {
+                        return Response.fail(ErrorCodes.USER_ALREADY_HAS_LOCK, "您已在该文档持有一个编辑区间");
+                    }
+                    return Response.fail(ErrorCodes.LOCK_FAILED, "区间锁申请失败");
+                }
 
-            syncDocumentEditingState(document);
-            Map<String, Object> result = new HashMap<>();
-            result.put("document", document);
-            result.put("lock", lock);
-            result.put("activeLocks", LOCK_SERVICE.getVisibleLocks(documentId));
-            return new Response(true, lock.isQueued() ? "编辑区间已进入等待队列" : "编辑区间申请成功", result);
+                syncDocumentEditingState(document);
+                Map<String, Object> result = new HashMap<>();
+                result.put("document", document);
+                result.put("lock", lock);
+                result.put("activeLocks", lockService.getVisibleLocks(documentId));
+                return new Response(true, lock.isQueued() ? "编辑区间已进入等待队列" : "编辑区间申请成功", result);
+            } catch (Exception e) {
+                LOGGER.error("Request edit failed, documentId={}", documentId, e);
+                return Response.fail(ErrorCodes.INTERNAL_ERROR, "编辑区间申请失败");
+            }
         }
     }
 
     public Response saveRange(String username, String documentId, String lockId, long clientRevision,
                               String replacementText, String comment) {
-        Document document = DOCUMENTS.get(documentId);
+        Document document = documents.get(documentId);
         if (document == null) {
-            return Response.fail("文档不存在");
+            return Response.fail(ErrorCodes.DOCUMENT_NOT_FOUND, "文档不存在");
         }
         if (replacementText == null) {
             return Response.fail("替换内容不能为空");
         }
         synchronized (documentMonitor(documentId)) {
-            RangeLock lock = LOCK_SERVICE.getLockById(documentId, lockId);
+            RangeLock lock = lockService.getLockById(documentId, lockId);
             if (lock == null || !username.equals(lock.getOwner())) {
-                return Response.fail("您没有该区间的编辑权限");
+                return Response.fail(ErrorCodes.NO_EDIT_PERMISSION, "您没有该区间的编辑权限");
             }
             if (clientRevision != document.getRevision() && clientRevision != lock.getBaseRevision()) {
-                return Response.fail("文档版本已更新，请刷新后重试");
+                return Response.fail(ErrorCodes.REVISION_STALE, "文档版本已更新，请刷新后重试");
             }
 
             try {
@@ -236,7 +264,7 @@ public class DocumentService {
                 int start = lock.getCurrentStart();
                 int end = lock.getCurrentEnd();
                 if (start < 0 || end < start || end > content.length()) {
-                    return Response.fail("锁定区间已失效，请刷新后重试");
+                    return Response.fail(ErrorCodes.INVALID_LOCK_RANGE, "锁定区间已失效，请刷新后重试");
                 }
 
                 long revisionBefore = document.getRevision();
@@ -245,7 +273,7 @@ public class DocumentService {
                 String newContent = content.substring(0, start) + replacementText + content.substring(end);
                 fileStorage.saveFile(document.getCurrentPath(), newContent.getBytes(StandardCharsets.UTF_8));
 
-                Response versionResponse = VERSION_SERVICE.createEditVersion(
+                Response versionResponse = versionService.createEditVersion(
                         documentId,
                         document.getFileName(),
                         username,
@@ -255,17 +283,21 @@ public class DocumentService {
                         replacementText,
                         revisionBefore,
                         revisionBefore + 1,
-                        comment
+                        comment,
+                        newContent
                 );
                 if (!versionResponse.isSuccess()) {
-                    return Response.fail("文档保存失败: " + versionResponse.getMessage());
+                    // Version record failed: restore the previous content so the
+                    // stored document never diverges from the version history.
+                    fileStorage.saveFile(document.getCurrentPath(), content.getBytes(StandardCharsets.UTF_8));
+                    return Response.fail(versionResponse.getCode(), "文档保存失败: " + versionResponse.getMessage());
                 }
 
                 document.setRevision(revisionBefore + 1);
                 document.setLastModifiedTime(LocalDateTime.now());
 
-                LOCK_SERVICE.shiftLocksAfterEdit(documentId, lockId, start, end, delta);
-                LockReleaseResult releaseResult = LOCK_SERVICE.releaseLockByOwner(documentId, username);
+                lockService.shiftLocksAfterEdit(documentId, lockId, start, end, delta);
+                LockReleaseResult releaseResult = lockService.releaseLockByOwner(documentId, username);
                 RangeLock releasedLock = releaseResult.getReleasedLocks().isEmpty() ? null : releaseResult.getReleasedLocks().get(0);
 
                 syncDocumentEditingState(document);
@@ -292,21 +324,22 @@ public class DocumentService {
                 result.put("promotedLocks", releaseResult.getPromotedLocks());
                 return new Response(true, "文档保存成功", result);
             } catch (Exception e) {
-                return Response.fail("文档保存失败: " + e.getMessage());
+                LOGGER.error("Save range failed, documentId={}", documentId, e);
+                return Response.fail(ErrorCodes.INTERNAL_ERROR, "文档保存失败");
             }
         }
     }
 
     public Response releaseEdit(String documentId, String username) {
-        Document document = DOCUMENTS.get(documentId);
+        Document document = documents.get(documentId);
         if (document == null) {
-            return Response.fail("文档不存在");
+            return Response.fail(ErrorCodes.DOCUMENT_NOT_FOUND, "文档不存在");
         }
 
         synchronized (documentMonitor(documentId)) {
-            LockReleaseResult releaseResult = LOCK_SERVICE.releaseLockByOwner(documentId, username);
+            LockReleaseResult releaseResult = lockService.releaseLockByOwner(documentId, username);
             if (releaseResult.getReleasedLocks().isEmpty()) {
-                return Response.fail("您不是该文档的编辑用户，无法释放编辑权限");
+                return Response.fail(ErrorCodes.NO_EDIT_PERMISSION, "您不是该文档的编辑用户，无法释放编辑权限");
             }
 
             syncDocumentEditingState(document);
@@ -318,18 +351,25 @@ public class DocumentService {
         }
     }
 
-    public Response rollbackDocumentToVersion(String username, String documentId, String versionId) {
-        Document document = DOCUMENTS.get(documentId);
+    /**
+     * Rolls the document content back to a historical version.
+     * Only the document owner or an ADMIN may roll back.
+     */
+    public Response rollbackDocumentToVersion(String username, String documentId, String versionId, boolean isAdmin) {
+        Document document = documents.get(documentId);
         if (document == null) {
-            return Response.fail("文档不存在");
+            return Response.fail(ErrorCodes.DOCUMENT_NOT_FOUND, "文档不存在");
+        }
+        if (!isAdmin && (username == null || !username.equals(document.getOwner()))) {
+            return Response.fail(ErrorCodes.FORBIDDEN, "只有文档所有者或管理员可以回滚该文档");
         }
 
         synchronized (documentMonitor(documentId)) {
-            if (LOCK_SERVICE.hasAnyLock(documentId)) {
-                return Response.fail("当前文档存在活动编辑区间，无法回滚");
+            if (lockService.hasAnyLock(documentId)) {
+                return Response.fail(ErrorCodes.ACTIVE_LOCKS_PRESENT, "当前文档存在活动编辑区间，无法回滚");
             }
 
-            Response rollbackResponse = VERSION_SERVICE.rollbackToVersion(document, versionId, username);
+            Response rollbackResponse = versionService.rollbackToVersion(document, versionId, username);
             if (rollbackResponse.isSuccess()) {
                 document.setLastModifiedTime(LocalDateTime.now());
                 document.setRevision(document.getRevision() + 1);
@@ -344,9 +384,9 @@ public class DocumentService {
         }
 
         int released = 0;
-        for (Document document : new ArrayList<>(DOCUMENTS.values())) {
+        for (Document document : new ArrayList<>(documents.values())) {
             synchronized (documentMonitor(document.getDocumentId())) {
-                LockReleaseResult result = LOCK_SERVICE.releaseLockByOwner(document.getDocumentId(), username);
+                LockReleaseResult result = lockService.releaseLockByOwner(document.getDocumentId(), username);
                 if (result.getReleasedLocks().isEmpty()) {
                     continue;
                 }
@@ -359,22 +399,18 @@ public class DocumentService {
 
     public List<RangeLock> getActiveLocks(String documentId) {
         synchronized (documentMonitor(documentId)) {
-            return LOCK_SERVICE.getActiveLocks(documentId);
+            return lockService.getActiveLocks(documentId);
         }
     }
 
     public boolean hasAnyLock(String documentId) {
         synchronized (documentMonitor(documentId)) {
-            return LOCK_SERVICE.hasAnyLock(documentId);
+            return lockService.hasAnyLock(documentId);
         }
     }
 
-    public void releaseAllEditsByUser(String username) {
-        releaseLocksHeldBy(username);
-    }
-
     private void syncDocumentEditingState(Document document) {
-        List<RangeLock> activeLocks = LOCK_SERVICE.getActiveLocks(document.getDocumentId());
+        List<RangeLock> activeLocks = lockService.getActiveLocks(document.getDocumentId());
         if (activeLocks.isEmpty()) {
             document.setEditingUser(null);
             document.setEditingStartTime(null);
@@ -388,29 +424,27 @@ public class DocumentService {
         document.setActiveLockCount(activeLocks.size());
     }
 
+    private Document copyOf(Document source) {
+        Document copy = new Document();
+        copy.setDocumentId(source.getDocumentId());
+        copy.setFileName(source.getFileName());
+        copy.setOwner(source.getOwner());
+        copy.setCurrentPath(source.getCurrentPath());
+        copy.setUploadTime(source.getUploadTime());
+        copy.setLastModifiedTime(source.getLastModifiedTime());
+        copy.setEditingUser(source.getEditingUser());
+        copy.setEditingStartTime(source.getEditingStartTime());
+        copy.setRevision(source.getRevision());
+        copy.setActiveLockCount(source.getActiveLockCount());
+        return copy;
+    }
+
     private int getDocumentLength(Document document) {
-        try {
-            return new String(fileStorage.readFile(document.getCurrentPath()), StandardCharsets.UTF_8).length();
-        } catch (Exception e) {
-            throw new IllegalStateException("读取文档长度失败", e);
-        }
+        return new String(fileStorage.readFile(document.getCurrentPath()), StandardCharsets.UTF_8).length();
     }
 
     private Object documentMonitor(String documentId) {
-        return DOCUMENT_MONITORS.computeIfAbsent(documentId, key -> new Object());
-    }
-
-    private boolean rangesOverlap(int startA, int endA, int startB, int endB) {
-        if (startA == endA && startB == endB) {
-            return startA == startB;
-        }
-        if (startA == endA) {
-            return startA > startB && startA < endB;
-        }
-        if (startB == endB) {
-            return startB > startA && startB < endA;
-        }
-        return startA < endB && startB < endA;
+        return documentMonitors.computeIfAbsent(documentId, key -> new Object());
     }
 
     private boolean isAllowedFileType(String fileName) {

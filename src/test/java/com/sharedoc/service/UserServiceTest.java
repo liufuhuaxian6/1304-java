@@ -2,6 +2,7 @@ package com.sharedoc.service;
 
 import com.sharedoc.model.Document;
 import com.sharedoc.model.Response;
+import com.sharedoc.model.User;
 import com.sharedoc.testutil.TestStateHelper;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -12,6 +13,7 @@ import java.util.Map;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class UserServiceTest {
@@ -34,11 +36,14 @@ class UserServiceTest {
     void loginRequiresCorrectPassword() {
         Response success = userService.login("admin", "123456");
         Response wrongPassword = userService.login("admin", "wrong-password");
+        Response unknownUser = userService.login("no-such-user", "123456");
 
         assertTrue(success.isSuccess());
         assertEquals("登录成功", success.getMessage());
         assertFalse(wrongPassword.isSuccess());
-        assertEquals("密码错误", wrongPassword.getMessage());
+        assertFalse(unknownUser.isSuccess());
+        // Unknown user and wrong password must be indistinguishable.
+        assertEquals(wrongPassword.getMessage(), unknownUser.getMessage());
     }
 
     @Test
@@ -57,20 +62,34 @@ class UserServiceTest {
 
     @Test
     void registerCreatesLoginableUserAndRejectsDuplicate() {
-        Response registered = userService.register("tester-reg", "pass123", "USER");
+        Response registered = userService.register("tester-reg", "pass123");
         assertTrue(registered.isSuccess());
         assertEquals("注册成功", registered.getMessage());
 
         Response login = userService.login("tester-reg", "pass123");
         assertTrue(login.isSuccess());
 
-        Response duplicate = userService.register("tester-reg", "other", "USER");
+        Response duplicate = userService.register("tester-reg", "other");
         assertFalse(duplicate.isSuccess());
         assertEquals("用户名已存在", duplicate.getMessage());
 
-        Response blankPassword = userService.register("tester-reg-2", "  ", "USER");
+        Response blankPassword = userService.register("tester-reg-2", "  ");
         assertFalse(blankPassword.isSuccess());
         assertEquals("密码不能为空", blankPassword.getMessage());
+    }
+
+    @Test
+    void registeredUsersAlwaysGetUserRoleAndNoPasswordExposure() {
+        Response registered = userService.register("role-check", "pass123");
+        assertTrue(registered.isSuccess());
+
+        User user = assertInstanceOf(User.class, registered.getData());
+        assertEquals("USER", user.getRole());
+        assertNull(user.getPassword());
+
+        User found = userService.findByUsername("role-check");
+        assertEquals("USER", found.getRole());
+        assertNull(found.getPassword());
     }
 
     private Document uploadDocument(String username, String fileName, String content) {

@@ -22,16 +22,39 @@
 
     <div v-if="!user" class="flex items-center justify-center min-h-screen">
         <div class="bg-white p-8 rounded-lg shadow-lg w-96">
-            <h2 class="text-2xl font-bold mb-6 text-center text-gray-800">系统登录</h2>
-            <div class="mb-4">
-                <label class="block text-gray-700 mb-2">用户名</label>
-                <input v-model="loginForm.username" type="text" class="w-full border rounded p-2 focus:outline-none focus:border-blue-500">
-            </div>
-            <div class="mb-6">
-                <label class="block text-gray-700 mb-2">密码</label>
-                <input v-model="loginForm.password" type="password" @keyup.enter="login" class="w-full border rounded p-2 focus:outline-none focus:border-blue-500">
-            </div>
-            <button type="button" @click="login" class="w-full bg-blue-500 text-white rounded p-2 hover:bg-blue-600">登录</button>
+            <h2 class="text-2xl font-bold mb-6 text-center text-gray-800">{{ showRegister ? '注册账号' : '系统登录' }}</h2>
+            <template v-if="!showRegister">
+                <div class="mb-4">
+                    <label class="block text-gray-700 mb-2">用户名</label>
+                    <input v-model="loginForm.username" type="text" class="w-full border rounded p-2 focus:outline-none focus:border-blue-500">
+                </div>
+                <div class="mb-6">
+                    <label class="block text-gray-700 mb-2">密码</label>
+                    <input v-model="loginForm.password" type="password" @keyup.enter="login" class="w-full border rounded p-2 focus:outline-none focus:border-blue-500">
+                </div>
+                <button type="button" @click="login" class="w-full bg-blue-500 text-white rounded p-2 hover:bg-blue-600">登录</button>
+            </template>
+            <template v-else>
+                <div class="mb-4">
+                    <label class="block text-gray-700 mb-2">用户名</label>
+                    <input v-model="registerForm.username" type="text" class="w-full border rounded p-2 focus:outline-none focus:border-blue-500">
+                </div>
+                <div class="mb-4">
+                    <label class="block text-gray-700 mb-2">密码</label>
+                    <input v-model="registerForm.password" type="password" class="w-full border rounded p-2 focus:outline-none focus:border-blue-500">
+                </div>
+                <div class="mb-6">
+                    <label class="block text-gray-700 mb-2">确认密码</label>
+                    <input v-model="registerForm.confirm" type="password" @keyup.enter="register" class="w-full border rounded p-2 focus:outline-none focus:border-blue-500">
+                </div>
+                <button type="button" @click="register" class="w-full bg-green-500 text-white rounded p-2 hover:bg-green-600">注册</button>
+            </template>
+            <p class="mt-4 text-center text-sm text-gray-500">
+                {{ showRegister ? '已有账号？' : '没有账号？' }}
+                <button type="button" @click="toggleRegister" class="text-blue-500 hover:text-blue-700 underline">
+                    {{ showRegister ? '返回登录' : '立即注册' }}
+                </button>
+            </p>
             <p v-if="error" class="text-red-500 mt-4 text-center">{{ error }}</p>
         </div>
     </div>

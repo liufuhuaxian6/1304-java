@@ -30,12 +30,16 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class DocumentServiceTest {
+    private LockService lockService;
+    private VersionService versionService;
     private DocumentService documentService;
 
     @BeforeEach
     void setUp() {
         TestStateHelper.resetState();
-        documentService = new DocumentService();
+        lockService = new LockService();
+        versionService = new VersionService();
+        documentService = new DocumentService(new FileStorage(), lockService, versionService);
     }
 
     @AfterEach
@@ -139,7 +143,6 @@ class DocumentServiceTest {
         Response secondSave = documentService.saveRange("admin", document.getDocumentId(), lockId(secondLock), 2L, "F", "same comment");
         assertTrue(secondSave.isSuccess());
 
-        VersionService versionService = new VersionService();
         Response versionsResponse = versionService.listVersions(document.getDocumentId());
         List<?> versions = assertInstanceOf(List.class, versionsResponse.getData());
         assertEquals(2, versions.size());
@@ -177,7 +180,6 @@ class DocumentServiceTest {
         Document firstDocument = uploadDocument("admin", "first.md", "first");
         Document secondDocument = uploadDocument("admin", "second.md", "second");
 
-        VersionService versionService = new VersionService();
         List<?> firstVersions = assertInstanceOf(List.class, versionService.listVersions(firstDocument.getDocumentId()).getData());
         List<?> secondVersions = assertInstanceOf(List.class, versionService.listVersions(secondDocument.getDocumentId()).getData());
 
@@ -297,7 +299,7 @@ class DocumentServiceTest {
     @Test
     void concurrentNonOverlappingSavesAreSerializedPerDocument() throws InterruptedException {
         CoordinatedFileStorage storage = new CoordinatedFileStorage();
-        DocumentService concurrentService = new DocumentService(storage);
+        DocumentService concurrentService = new DocumentService(storage, new LockService(), new VersionService());
         Document document = uploadDocument(concurrentService, "admin", "concurrent.md", "0123456789");
 
         Response leftLock = concurrentService.requestEdit(document.getDocumentId(), "admin", 1L, 0, 2);
@@ -356,10 +358,48 @@ class DocumentServiceTest {
         Document document = uploadDocument("admin", "rollback.md", "v1");
         assertTrue(documentService.requestEdit(document.getDocumentId(), "admin", 1L, 0, 1).isSuccess());
 
-        Response rollbackResponse = documentService.rollbackDocumentToVersion("admin", document.getDocumentId(), "V-1");
+        Response rollbackResponse = documentService.rollbackDocumentToVersion("admin", document.getDocumentId(), "V-1", false);
 
         assertFalse(rollbackResponse.isSuccess());
         assertNotNull(rollbackResponse.getMessage());
+    }
+
+    @Test
+    void rollbackByNonOwnerWithoutAdminRoleIsForbidden() {
+        Document document = uploadDocument("admin", "owned.md", "v1");
+
+        Response forbidden = documentService.rollbackDocumentToVersion("user", document.getDocumentId(), "V-1", false);
+        assertFalse(forbidden.isSuccess());
+        assertEquals("FORBIDDEN", forbidden.getCode());
+
+        Response asAdmin = documentService.rollbackDocumentToVersion("user", document.getDocumentId(), "V-1", true);
+        assertTrue(asAdmin.isSuccess());
+    }
+
+    @Test
+    void uploadSanitizesPathTraversalFileName() {
+        Response uploadResponse = documentService.uploadDocument("admin", "..\\..\\evil.md", "# attack".getBytes());
+
+        assertTrue(uploadResponse.isSuccess());
+        Map<String, Object> data = responseData(uploadResponse);
+        Document document = assertInstanceOf(Document.class, data.get("document"));
+        assertEquals("evil.md", document.getFileName());
+
+        Path storedPath = Path.of(document.getCurrentPath()).normalize().toAbsolutePath();
+        Path storageRoot = Path.of("data", "documents").normalize().toAbsolutePath();
+        assertTrue(storedPath.startsWith(storageRoot),
+                "Stored file must stay inside the document storage directory: " + storedPath);
+    }
+
+    @Test
+    void uploadRejectsOversizedFile() {
+        byte[] oversized = new byte[com.sharedoc.server.ServerConfig.MAX_UPLOAD_BYTES + 1];
+        oversized[0] = '#';
+
+        Response uploadResponse = documentService.uploadDocument("admin", "big.md", oversized);
+
+        assertFalse(uploadResponse.isSuccess());
+        assertEquals("FILE_TOO_LARGE", uploadResponse.getCode());
     }
 
     private Document uploadDocument(String username, String fileName, String content) {

@@ -1,6 +1,6 @@
 const { createApp, ref, reactive, onMounted, computed, nextTick } = Vue;
 
-const API_BASE = 'http://localhost:8082/api/v1';
+const API_BASE = window.SHAREDOC_API_BASE || 'http://localhost:8082/api/v1';
 const AUTH_STORAGE = window.sessionStorage;
 const CODE_LANGUAGE_MAP = {
     c: 'c',
@@ -245,6 +245,8 @@ createApp({
     setup() {
         const user = ref(null);
         const loginForm = reactive({ username: '', password: '' });
+        const showRegister = ref(false);
+        const registerForm = reactive({ username: '', password: '', confirm: '' });
         const error = ref('');
         const toast = ref('');
 
@@ -472,6 +474,40 @@ createApp({
                 await fetchDocuments();
             } catch (err) {
             }
+        };
+
+        const register = async () => {
+            error.value = '';
+            if (!registerForm.username || !registerForm.password) {
+                error.value = '请输入用户名和密码';
+                return;
+            }
+            if (registerForm.password !== registerForm.confirm) {
+                error.value = '两次输入的密码不一致';
+                return;
+            }
+            try {
+                await apiCall('/auth/register', {
+                    method: 'POST',
+                    body: JSON.stringify({
+                        username: registerForm.username,
+                        password: registerForm.password
+                    })
+                });
+                showToast('注册成功，请登录');
+                loginForm.username = registerForm.username;
+                loginForm.password = '';
+                registerForm.username = '';
+                registerForm.password = '';
+                registerForm.confirm = '';
+                showRegister.value = false;
+            } catch (err) {
+            }
+        };
+
+        const toggleRegister = () => {
+            showRegister.value = !showRegister.value;
+            error.value = '';
         };
 
         const logout = async () => {
@@ -894,13 +930,12 @@ createApp({
                     queuePosition: data.queuePosition || 0
                 };
                 activeLocks.value = data.activeLocks || [];
-                if (silent) {
-                    return currentLock.value;
+                if (!silent) {
+                    showToast('已锁定当前区域');
                 }
                 return currentLock.value;
-                showToast('已锁定当前区域');
             } catch (err) {
-                if (err.message.includes('正在被其他用户编辑') || err.message.includes('版本已更新')) {
+                if (err.message.includes('版本已更新')) {
                     await reloadCurrentDocument(true);
                 }
                 throw err;
@@ -1201,6 +1236,10 @@ createApp({
         return {
             user,
             loginForm,
+            showRegister,
+            registerForm,
+            register,
+            toggleRegister,
             error,
             toast,
             currentView,

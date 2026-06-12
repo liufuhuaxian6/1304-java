@@ -1,13 +1,13 @@
 package com.sharedoc.server;
 
+import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.SerializationFeature;
 import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
-import com.google.gson.Gson;
 import com.sharedoc.model.ContentUpdateResult;
 import com.sharedoc.model.Document;
 import com.sharedoc.model.DocumentVersion;
-import com.sharedoc.model.LockReleaseResult;
+import com.sharedoc.model.ErrorCodes;
 import com.sharedoc.model.RangeLock;
 import com.sharedoc.model.Response;
 import com.sharedoc.model.User;
@@ -17,10 +17,16 @@ import com.sharedoc.service.VersionService;
 import com.sharedoc.util.DateTimeUtil;
 import io.javalin.Javalin;
 import io.javalin.http.Context;
+import io.javalin.http.HandlerType;
+import io.javalin.http.UnauthorizedResponse;
 import io.javalin.http.UploadedFile;
 import io.javalin.json.JavalinJackson;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
+import java.io.IOException;
 import java.io.InputStream;
+import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -28,19 +34,41 @@ import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.logging.Level;
-import java.util.logging.Logger;
 
+/**
+ * HTTP API server.
+ *
+ * Authentication: opaque bearer tokens with a sliding TTL
+ * ({@link ServerConfig#SESSION_TTL}). The before-handler stops request
+ * processing for unauthenticated requests via skipRemainingHandlers, so
+ * protected handlers never run without a valid session.
+ *
+ * Error responses use machine-readable codes (see {@link ErrorCodes});
+ * HTTP status codes are derived from those codes, never from message text.
+ */
 public class HttpApiServer {
-    private static final Logger LOGGER = Logger.getLogger(HttpApiServer.class.getName());
+    private static final Logger LOGGER = LoggerFactory.getLogger(HttpApiServer.class);
+
     private final UserService userService;
     private final DocumentService documentService;
     private final VersionService versionService;
-    private final Gson gson = new Gson();
+    private final ObjectMapper bodyMapper = new ObjectMapper();
     private final DocumentEventBroker eventBroker = new DocumentEventBroker();
 
-    private final Map<String, String> tokenStore = new ConcurrentHashMap<>();
+    private final Map<String, Session> tokenStore = new ConcurrentHashMap<>();
     private Javalin app;
+
+    private static final class Session {
+        private final String username;
+        private final String role;
+        private volatile long expiresAtMillis;
+
+        private Session(String username, String role, long expiresAtMillis) {
+            this.username = username;
+            this.role = role;
+            this.expiresAtMillis = expiresAtMillis;
+        }
+    }
 
     public HttpApiServer(UserService userService, DocumentService documentService, VersionService versionService) {
         this.userService = userService;
@@ -59,13 +87,26 @@ public class HttpApiServer {
 
         app = Javalin.create(config -> {
             config.jsonMapper(new JavalinJackson(jacksonMapper));
-            config.plugins.enableCors(cors -> cors.add(it -> it.anyHost()));
+            config.http.maxRequestSize = ServerConfig.MAX_UPLOAD_BYTES + 1_048_576L;
+            config.plugins.enableCors(cors -> cors.add(it -> {
+                if (ServerConfig.CORS_ORIGINS.contains("*")) {
+                    it.anyHost();
+                } else {
+                    List<String> origins = ServerConfig.CORS_ORIGINS;
+                    it.allowHost(origins.get(0), origins.subList(1, origins.size()).toArray(new String[0]));
+                }
+            }));
         });
 
         registerRoutes(app);
+        app.exception(UnauthorizedResponse.class, (e, ctx) ->
+                ctx.status(401).json(error(ErrorCodes.AUTH_REQUIRED, e.getMessage())));
+        app.exception(Exception.class, (e, ctx) -> {
+            LOGGER.error("Unhandled exception, path={}", ctx.path(), e);
+            ctx.status(500).json(error(ErrorCodes.INTERNAL_ERROR, "服务器内部错误"));
+        });
         app.start(port);
-        LOGGER.info(() -> "HTTP API Server started on port " + port);
-        System.out.println("HTTP API Server started on port " + port);
+        LOGGER.info("HTTP API Server started on port {}", port);
     }
 
     public synchronized void stop() {
@@ -81,32 +122,29 @@ public class HttpApiServer {
         app.before("/api/v1/documents/*", this::requireAuth);
         app.before("/api/v1/documents", this::requireAuth);
         app.before("/api/v1/auth/me", this::requireAuth);
-        app.before("/api/v1/auth/logout", this::requireLogoutAuth);
+        app.before("/api/v1/auth/logout", this::requireAuth);
 
         app.post("/api/v1/auth/login", ctx -> {
             Map<String, Object> body = parseBody(ctx);
             String username = stringValue(body.get("username"));
             String password = stringValue(body.get("password"));
-            LOGGER.info(() -> "Login attempt username=" + safe(username) + ", ip=" + ctx.ip());
+            LOGGER.info("Login attempt username={}, ip={}", safe(username), ctx.ip());
 
             Response res = userService.login(username, password);
             if (!res.isSuccess()) {
-                LOGGER.warning(() -> "Login failed username=" + safe(username) + ", reason=" + res.getMessage());
-                ctx.status(401).json(error("INVALID_CREDENTIALS", res.getMessage()));
+                LOGGER.warn("Login failed username={}", safe(username));
+                respondError(ctx, res);
                 return;
             }
 
+            User user = (User) res.getData();
             String token = "token-" + UUID.randomUUID();
-            tokenStore.put(token, username);
-
-            User user = new User();
-            user.setUsername(username);
-            user.setUserId("U-" + username.toUpperCase());
+            tokenStore.put(token, new Session(username, user.getRole(), newExpiry()));
 
             Map<String, Object> data = new HashMap<>();
             data.put("token", token);
             data.put("user", user);
-            LOGGER.info(() -> "Login success username=" + safe(username) + ", token=" + token);
+            LOGGER.info("Login success username={}", safe(username));
             ctx.json(success("登录成功", data));
         });
 
@@ -114,16 +152,19 @@ public class HttpApiServer {
             String username = ctx.attribute("username");
             String token = ctx.attribute("token");
             Response response = userService.logout(username);
-            tokenStore.remove(token);
+            if (token != null) {
+                tokenStore.remove(token);
+            }
             ctx.json(success(response.getMessage(), null));
         });
 
         app.get("/api/v1/auth/me", ctx -> {
             String username = ctx.attribute("username");
-            User user = new User();
-            user.setUsername(username);
-            user.setUserId("U-" + username.toUpperCase());
-            LOGGER.fine(() -> "Auth me username=" + safe(username));
+            User user = userService.findByUsername(username);
+            if (user == null) {
+                ctx.status(401).json(error(ErrorCodes.AUTH_REQUIRED, "用户不存在或会话已失效"));
+                return;
+            }
             ctx.json(success("获取当前用户成功", user));
         });
 
@@ -131,69 +172,59 @@ public class HttpApiServer {
             Map<String, Object> body = parseBody(ctx);
             String username = stringValue(body.get("username"));
             String password = stringValue(body.get("password"));
-            String role = stringValue(body.get("role"));
 
-            Response res = userService.register(username, password, role);
+            // Self-registration always produces a USER account; any client
+            // supplied role field is deliberately ignored.
+            Response res = userService.register(username, password);
             if (!res.isSuccess()) {
-                ctx.status(400).json(error("REGISTER_FAILED", res.getMessage()));
+                respondError(ctx, res);
                 return;
             }
 
+            User user = (User) res.getData();
             Map<String, Object> data = new HashMap<>();
-            data.put("username", username);
-            data.put("role", (role == null || role.isBlank()) ? "USER" : role);
+            data.put("username", user.getUsername());
+            data.put("role", user.getRole());
             ctx.status(201).json(success("注册成功", data));
         });
 
         app.get("/api/v1/documents", ctx -> {
             Response res = documentService.listDocuments();
-            if (res.isSuccess()) {
-                List<?> documents = res.getData() instanceof List<?> list ? list : List.of();
-                LOGGER.info(() -> "List documents username=" + safe(ctx.attribute("username"))
-                        + ", count=" + documents.size());
-                ctx.json(success("文档列表获取成功", res.getData()));
-            } else {
-                LOGGER.warning(() -> "List documents failed username=" + safe(ctx.attribute("username"))
-                        + ", reason=" + res.getMessage());
-                ctx.status(500).json(error("INTERNAL_ERROR", res.getMessage()));
+            if (!res.isSuccess()) {
+                respondError(ctx, res);
+                return;
             }
+            ctx.json(success("文档列表获取成功", res.getData()));
         });
 
         app.post("/api/v1/documents", ctx -> {
             String username = ctx.attribute("username");
-            UploadedFile file = ctx.uploadedFile("file");
-            LOGGER.info(() -> "Upload request username=" + safe(username)
-                    + ", hasFile=" + (file != null)
-                    + ", filename=" + safe(file == null ? null : file.filename()));
+            UploadedFile file;
+            try {
+                file = ctx.uploadedFile("file");
+            } catch (Exception e) {
+                // Jetty rejects multipart bodies whose headers are not valid
+                // UTF-8 (for example a filename sent in a legacy encoding).
+                LOGGER.warn("Malformed multipart upload, ip={}: {}", ctx.ip(), e.getMessage());
+                ctx.status(400).json(error(ErrorCodes.BAD_REQUEST, "上传请求格式错误，请使用 UTF-8 编码的文件名"));
+                return;
+            }
             if (file == null) {
-                LOGGER.warning(() -> "Upload rejected username=" + safe(username) + ", reason=No file uploaded");
-                ctx.status(400).json(error("BAD_REQUEST", "No file uploaded"));
+                ctx.status(400).json(error(ErrorCodes.BAD_REQUEST, "No file uploaded"));
                 return;
             }
 
             try (InputStream inputStream = file.content()) {
                 byte[] content = inputStream.readAllBytes();
                 Response res = documentService.uploadDocument(username, file.filename(), content);
-                if (res.isSuccess()) {
-                    Map<String, Object> data = res.getData() instanceof Map<?, ?> map
-                            ? castMap(map)
-                            : Map.of();
-                    Object document = data.get("document");
-                    LOGGER.info(() -> "Upload success username=" + safe(username)
-                            + ", filename=" + safe(file.filename())
-                            + ", owner=" + extractDocumentField(document, "owner")
-                            + ", documentId=" + extractDocumentField(document, "documentId"));
-                    ctx.json(success("文档上传成功", res.getData()));
-                } else {
-                    LOGGER.warning(() -> "Upload failed username=" + safe(username)
-                            + ", filename=" + safe(file.filename())
-                            + ", reason=" + res.getMessage());
-                    ctx.status(400).json(error("BAD_REQUEST", res.getMessage()));
+                if (!res.isSuccess()) {
+                    LOGGER.warn("Upload failed username={}, filename={}, reason={}",
+                            safe(username), safe(file.filename()), res.getMessage());
+                    respondError(ctx, res);
+                    return;
                 }
-            } catch (Exception e) {
-                LOGGER.log(Level.SEVERE, "Upload exception username=" + safe(username)
-                        + ", filename=" + safe(file.filename()), e);
-                ctx.status(500).json(error("INTERNAL_ERROR", "Failed to upload file: " + e.getMessage()));
+                LOGGER.info("Upload success username={}, filename={}", safe(username), safe(file.filename()));
+                ctx.json(success("文档上传成功", res.getData()));
             }
         });
 
@@ -201,7 +232,7 @@ public class HttpApiServer {
             String docId = ctx.pathParam("documentId");
             Response res = documentService.viewDocument(docId);
             if (!res.isSuccess()) {
-                ctx.status(404).json(error("DOCUMENT_NOT_FOUND", res.getMessage()));
+                respondError(ctx, res);
                 return;
             }
 
@@ -218,7 +249,7 @@ public class HttpApiServer {
             String docId = ctx.pathParam("documentId");
             Response res = documentService.getDocumentContent(docId);
             if (!res.isSuccess()) {
-                ctx.status(404).json(error("DOCUMENT_NOT_FOUND", res.getMessage()));
+                respondError(ctx, res);
                 return;
             }
             ctx.json(success("文档内容获取成功", res.getData()));
@@ -228,7 +259,7 @@ public class HttpApiServer {
             String docId = ctx.pathParam("documentId");
             Response res = documentService.downloadDocument(docId);
             if (!res.isSuccess()) {
-                ctx.status(404).json(error("DOCUMENT_NOT_FOUND", res.getMessage()));
+                respondError(ctx, res);
                 return;
             }
 
@@ -236,7 +267,7 @@ public class HttpApiServer {
             Map<String, Object> result = (Map<String, Object>) res.getData();
             Document doc = (Document) result.get("document");
             byte[] content = (byte[]) result.get("fileContent");
-            ctx.header("Content-Disposition", "attachment; filename=\"" + doc.getFileName() + "\"");
+            ctx.header("Content-Disposition", contentDisposition(doc.getFileName()));
             ctx.header("X-Document-Id", doc.getDocumentId());
             ctx.contentType("application/octet-stream");
             ctx.result(content);
@@ -252,7 +283,7 @@ public class HttpApiServer {
 
             Response res = documentService.requestEdit(docId, username, revision, start, end);
             if (!res.isSuccess()) {
-                ctx.status(mapLockStatus(res.getMessage())).json(error(mapLockCode(res.getMessage()), res.getMessage()));
+                respondError(ctx, res);
                 return;
             }
 
@@ -284,7 +315,7 @@ public class HttpApiServer {
             String username = ctx.attribute("username");
             Response res = documentService.releaseEdit(docId, username);
             if (!res.isSuccess()) {
-                ctx.status(403).json(error("NO_EDIT_PERMISSION", res.getMessage()));
+                respondError(ctx, res);
                 return;
             }
 
@@ -316,16 +347,7 @@ public class HttpApiServer {
 
             Response res = documentService.saveRange(username, docId, lockId, clientRevision, replacementText, comment);
             if (!res.isSuccess()) {
-                String code = "NO_EDIT_PERMISSION";
-                int status = 403;
-                if (res.getMessage().contains("版本已更新")) {
-                    code = "REVISION_STALE";
-                    status = 409;
-                } else if (res.getMessage().contains("锁定区间已失效")) {
-                    code = "INVALID_LOCK_RANGE";
-                    status = 409;
-                }
-                ctx.status(status).json(error(code, res.getMessage()));
+                respondError(ctx, res);
                 return;
             }
 
@@ -356,14 +378,14 @@ public class HttpApiServer {
         });
 
         app.put("/api/v1/documents/{documentId}/content", ctx -> {
-            ctx.status(405).json(error("METHOD_NOT_ALLOWED", "请使用 PATCH 进行局部保存"));
+            ctx.status(405).json(error(ErrorCodes.METHOD_NOT_ALLOWED, "请使用 PATCH 进行局部保存"));
         });
 
         app.get("/api/v1/documents/{documentId}/versions", ctx -> {
             String docId = ctx.pathParam("documentId");
             Response res = versionService.listVersions(docId);
             if (!res.isSuccess()) {
-                ctx.status(400).json(error("BAD_REQUEST", res.getMessage()));
+                respondError(ctx, res);
                 return;
             }
 
@@ -391,7 +413,7 @@ public class HttpApiServer {
             String versionId = ctx.pathParam("versionId");
             Response res = versionService.downloadVersion(docId, versionId);
             if (!res.isSuccess()) {
-                ctx.status(404).json(error("VERSION_NOT_FOUND", res.getMessage()));
+                respondError(ctx, res);
                 return;
             }
 
@@ -399,7 +421,7 @@ public class HttpApiServer {
             Map<String, Object> result = (Map<String, Object>) res.getData();
             DocumentVersion version = (DocumentVersion) result.get("version");
             byte[] content = (byte[]) result.get("fileContent");
-            ctx.header("Content-Disposition", "attachment; filename=\"" + version.getFileName() + "\"");
+            ctx.header("Content-Disposition", contentDisposition(version.getFileName()));
             ctx.header("X-Version-Id", version.getVersionId());
             ctx.contentType("application/octet-stream");
             ctx.result(content);
@@ -410,7 +432,7 @@ public class HttpApiServer {
             String versionId = ctx.pathParam("versionId");
             Response res = versionService.diffWithPreviousVersion(docId, versionId);
             if (!res.isSuccess()) {
-                ctx.status(404).json(error("VERSION_DIFF_NOT_FOUND", res.getMessage()));
+                respondError(ctx, res);
                 return;
             }
             ctx.json(success("版本差异获取成功", res.getData()));
@@ -420,12 +442,11 @@ public class HttpApiServer {
             String docId = ctx.pathParam("documentId");
             String versionId = ctx.pathParam("versionId");
             String username = ctx.attribute("username");
+            boolean isAdmin = "ADMIN".equals(ctx.attribute("role"));
 
-            Response res = documentService.rollbackDocumentToVersion(username, docId, versionId);
+            Response res = documentService.rollbackDocumentToVersion(username, docId, versionId, isAdmin);
             if (!res.isSuccess()) {
-                int status = res.getMessage().contains("活动编辑区间") ? 409 : 403;
-                String code = res.getMessage().contains("活动编辑区间") ? "ACTIVE_LOCKS_PRESENT" : "ROLLBACK_FAILED";
-                ctx.status(status).json(error(code, res.getMessage()));
+                respondError(ctx, res);
                 return;
             }
             ctx.json(success("版本回滚成功", res.getData()));
@@ -441,17 +462,13 @@ public class HttpApiServer {
             eventBroker.broadcast(docId, "document-rolled-back", event);
         });
 
+        // The before-handler has already authenticated this request
+        // (EventSource cannot send headers, so the token arrives as a
+        // query parameter, which extractToken supports).
         app.sse("/api/v1/documents/{documentId}/events", client -> {
             Context ctx = client.ctx();
-            String token = extractToken(ctx);
-            if (token == null || !tokenStore.containsKey(token)) {
-                ctx.status(401);
-                client.close();
-                return;
-            }
-
             String docId = ctx.pathParam("documentId");
-            if (!documentService.getDocumentContent(docId).isSuccess()) {
+            if (!documentService.documentExists(docId)) {
                 ctx.status(404);
                 client.close();
                 return;
@@ -462,32 +479,65 @@ public class HttpApiServer {
         });
     }
 
+    /**
+     * Authenticates the request. Throwing UnauthorizedResponse aborts the
+     * handler chain, so a protected endpoint can never run without a valid
+     * session (setting a status in a before-handler alone would NOT stop
+     * Javalin from invoking the endpoint handler).
+     */
     private void requireAuth(Context ctx) {
-        String token = extractToken(ctx);
-        if (token == null || !tokenStore.containsKey(token)) {
-            LOGGER.warning(() -> "Auth failed path=" + ctx.path() + ", token=" + safe(token) + ", ip=" + ctx.ip());
-            ctx.status(401).json(error("AUTH_REQUIRED", "Unauthorized"));
+        // CORS preflight requests never carry credentials (per spec); they are
+        // answered by the CORS plugin and must not be rejected here, otherwise
+        // every cross-origin call from the frontend fails before it starts.
+        if (ctx.method() == HandlerType.OPTIONS) {
             return;
         }
-        String username = tokenStore.get(token);
-        LOGGER.fine(() -> "Auth success path=" + ctx.path() + ", username=" + safe(username));
-        ctx.attribute("username", username);
-    }
-
-    private void requireLogoutAuth(Context ctx) {
-        String token = extractToken(ctx);
-        if (token == null || !tokenStore.containsKey(token)) {
-            ctx.status(401).json(error("AUTH_REQUIRED", "Unauthorized"));
-            return;
+        Session session = activeSession(ctx);
+        if (session == null) {
+            LOGGER.warn("Auth failed path={}, ip={}", ctx.path(), ctx.ip());
+            throw new UnauthorizedResponse("未登录或会话已过期");
         }
-        ctx.attribute("username", tokenStore.get(token));
-        ctx.attribute("token", token);
+        ctx.attribute("username", session.username);
+        ctx.attribute("role", session.role);
+        ctx.attribute("token", extractToken(ctx));
     }
 
-    @SuppressWarnings("unchecked")
+    /**
+     * Resolves the session for the request token, enforcing the sliding TTL:
+     * expired sessions are evicted, live sessions get their expiry extended.
+     */
+    private Session activeSession(Context ctx) {
+        String token = extractToken(ctx);
+        if (token == null) {
+            return null;
+        }
+        Session session = tokenStore.get(token);
+        if (session == null) {
+            return null;
+        }
+        if (session.expiresAtMillis < System.currentTimeMillis()) {
+            tokenStore.remove(token);
+            return null;
+        }
+        session.expiresAtMillis = newExpiry();
+        return session;
+    }
+
+    private long newExpiry() {
+        return System.currentTimeMillis() + ServerConfig.SESSION_TTL.toMillis();
+    }
+
     private Map<String, Object> parseBody(Context ctx) {
-        Map<String, Object> body = gson.fromJson(ctx.body(), Map.class);
-        return body == null ? new HashMap<>() : body;
+        String body = ctx.body();
+        if (body == null || body.isBlank()) {
+            return new HashMap<>();
+        }
+        try {
+            Map<String, Object> parsed = bodyMapper.readValue(body, new TypeReference<Map<String, Object>>() { });
+            return parsed == null ? new HashMap<>() : parsed;
+        } catch (IOException e) {
+            return new HashMap<>();
+        }
     }
 
     private List<RangeLock> castLocks(Object value) {
@@ -515,34 +565,47 @@ public class HttpApiServer {
     }
 
     private int intValue(Object value) {
+        if (value instanceof Number number) {
+            return number.intValue();
+        }
         return value == null ? 0 : (int) Math.round(Double.parseDouble(String.valueOf(value)));
     }
 
     private long longValue(Object value) {
+        if (value instanceof Number number) {
+            return number.longValue();
+        }
         return value == null ? 0L : Math.round(Double.parseDouble(String.valueOf(value)));
     }
 
-    private int mapLockStatus(String message) {
-        if (message.contains("版本已更新")) {
-            return 409;
-        }
-        if (message.contains("区间") || message.contains("持有")) {
-            return 409;
-        }
-        return 400;
+    private void respondError(Context ctx, Response res) {
+        String code = res.getCode() == null ? ErrorCodes.BAD_REQUEST : res.getCode();
+        ctx.status(statusFor(code)).json(error(code, res.getMessage()));
     }
 
-    private String mapLockCode(String message) {
-        if (message.contains("版本已更新")) {
-            return "REVISION_STALE";
-        }
-        if (message.contains("目标区间正在被")) {
-            return "RANGE_LOCKED";
-        }
-        if (message.contains("持有一个编辑区间")) {
-            return "USER_ALREADY_HAS_LOCK";
-        }
-        return "BAD_REQUEST";
+    private int statusFor(String code) {
+        return switch (code) {
+            case ErrorCodes.AUTH_REQUIRED, ErrorCodes.INVALID_CREDENTIALS -> 401;
+            case ErrorCodes.FORBIDDEN, ErrorCodes.NO_EDIT_PERMISSION -> 403;
+            case ErrorCodes.DOCUMENT_NOT_FOUND, ErrorCodes.VERSION_NOT_FOUND -> 404;
+            case ErrorCodes.METHOD_NOT_ALLOWED -> 405;
+            case ErrorCodes.REVISION_STALE, ErrorCodes.USER_ALREADY_HAS_LOCK, ErrorCodes.LOCK_FAILED,
+                    ErrorCodes.INVALID_LOCK_RANGE, ErrorCodes.ACTIVE_LOCKS_PRESENT -> 409;
+            case ErrorCodes.FILE_TOO_LARGE -> 413;
+            case ErrorCodes.INTERNAL_ERROR -> 500;
+            default -> 400;
+        };
+    }
+
+    /**
+     * Builds an RFC 6266/5987 Content-Disposition header so non-ASCII file
+     * names (for example Chinese) download correctly, with an ASCII fallback.
+     */
+    private String contentDisposition(String fileName) {
+        String safeName = fileName == null ? "document" : fileName;
+        String fallback = safeName.replaceAll("[^\\x20-\\x7E]", "_").replace("\"", "_").replace("\\", "_");
+        String encoded = URLEncoder.encode(safeName, StandardCharsets.UTF_8).replace("+", "%20");
+        return "attachment; filename=\"" + fallback + "\"; filename*=UTF-8''" + encoded;
     }
 
     private String extractToken(Context ctx) {
@@ -556,7 +619,7 @@ public class HttpApiServer {
     private Map<String, Object> success(String message, Object data) {
         Map<String, Object> map = new HashMap<>();
         map.put("success", true);
-        map.put("code", "OK");
+        map.put("code", ErrorCodes.OK);
         map.put("message", message);
         map.put("data", data);
         return map;
@@ -569,26 +632,6 @@ public class HttpApiServer {
         map.put("message", message);
         map.put("data", null);
         return map;
-    }
-
-    @SuppressWarnings("unchecked")
-    private Map<String, Object> castMap(Map<?, ?> map) {
-        return (Map<String, Object>) map;
-    }
-
-    private String extractDocumentField(Object document, String field) {
-        if (document instanceof com.sharedoc.model.Document doc) {
-            if ("owner".equals(field)) {
-                return safe(doc.getOwner());
-            }
-            if ("documentId".equals(field)) {
-                return safe(doc.getDocumentId());
-            }
-        }
-        if (document instanceof Map<?, ?> map) {
-            return safe(map.get(field));
-        }
-        return "null";
     }
 
     private String safe(Object value) {

@@ -1,8 +1,12 @@
 package com.sharedoc.server;
 
+import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.sharedoc.service.DocumentService;
+import com.sharedoc.service.LockService;
 import com.sharedoc.service.UserService;
 import com.sharedoc.service.VersionService;
+import com.sharedoc.storage.FileStorage;
 import com.sharedoc.testutil.TestStateHelper;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -26,6 +30,7 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class HttpApiServerTest {
+    private final ObjectMapper objectMapper = new ObjectMapper();
     private HttpApiServer apiServer;
     private HttpClient httpClient;
     private String baseUrl;
@@ -38,9 +43,9 @@ class HttpApiServerTest {
         baseUrl = "http://127.0.0.1:" + port + "/api/v1";
         httpClient = HttpClient.newHttpClient();
 
-        DocumentService documentService = new DocumentService();
-        UserService userService = new UserService(documentService);
         VersionService versionService = new VersionService();
+        DocumentService documentService = new DocumentService(new FileStorage(), new LockService(), versionService);
+        UserService userService = new UserService(documentService);
 
         apiServer = new HttpApiServer(userService, documentService, versionService);
         apiServer.start(port);
@@ -75,7 +80,7 @@ class HttpApiServerTest {
         Map<String, Object> contentJson = jsonResponse(contentResponse);
         Map<String, Object> contentData = map(contentJson.get("data"));
         assertEquals("# hello", contentData.get("contentText"));
-        assertEquals(1.0, contentData.get("revision"));
+        assertEquals(1, contentData.get("revision"));
 
         HttpResponse<String> lockResponse = sendJson("POST", "/documents/" + documentId + "/lock", """
                 {"start":6,"end":6,"revision":1}
@@ -235,7 +240,111 @@ class HttpApiServerTest {
         Map<String, Object> contentData = map(contentJson.get("data"));
         assertEquals(200, contentResponse.statusCode());
         assertEquals("abZZef", contentData.get("contentText"));
-        assertEquals(2.0, contentData.get("revision"));
+        assertEquals(2, contentData.get("revision"));
+    }
+
+    @Test
+    void unauthorizedRequestsAreRejectedWithoutLeakingData() throws Exception {
+        String adminToken = login("admin", "123456");
+        String documentId = uploadTextDocument(adminToken, "secret.md", "TOP-SECRET-CONTENT");
+
+        HttpResponse<String> listResponse = sendJson("GET", "/documents", null, null);
+        assertEquals(401, listResponse.statusCode());
+        assertEquals("AUTH_REQUIRED", jsonResponse(listResponse).get("code"));
+        assertFalse(listResponse.body().contains("secret.md"));
+
+        HttpResponse<String> contentResponse = sendJson("GET", "/documents/" + documentId + "/content", null, null);
+        assertEquals(401, contentResponse.statusCode());
+        assertFalse(contentResponse.body().contains("TOP-SECRET-CONTENT"),
+                "Unauthorized content request must not leak document text");
+
+        HttpResponse<byte[]> downloadResponse = sendDownload("/documents/" + documentId + "/download", null);
+        assertEquals(401, downloadResponse.statusCode());
+        assertFalse(new String(downloadResponse.body(), StandardCharsets.UTF_8).contains("TOP-SECRET-CONTENT"),
+                "Unauthorized download must not leak file bytes");
+
+        HttpResponse<String> staleTokenResponse = sendJson("GET", "/documents", null, "token-invalid");
+        assertEquals(401, staleTokenResponse.statusCode());
+
+        HttpResponse<String> versionsResponse = sendJson("GET", "/documents/" + documentId + "/versions", null, null);
+        assertEquals(401, versionsResponse.statusCode());
+        assertFalse(versionsResponse.body().contains("secret.md"));
+    }
+
+    @Test
+    void corsPreflightRequestsBypassAuthentication() throws Exception {
+        // Browsers send an OPTIONS preflight without credentials before any
+        // cross-origin request that carries an Authorization header. The auth
+        // filter must let it through, otherwise the frontend cannot call any
+        // protected endpoint at all.
+        HttpRequest preflight = HttpRequest.newBuilder(URI.create(baseUrl + "/documents"))
+                .method("OPTIONS", HttpRequest.BodyPublishers.noBody())
+                .header("Origin", "http://localhost:8003")
+                .header("Access-Control-Request-Method", "GET")
+                .header("Access-Control-Request-Headers", "authorization,content-type")
+                .build();
+        HttpResponse<String> response = httpClient.send(preflight, HttpResponse.BodyHandlers.ofString());
+
+        assertEquals(200, response.statusCode());
+        assertEquals("http://localhost:8003",
+                response.headers().firstValue("Access-Control-Allow-Origin").orElse(null));
+
+        HttpRequest nestedPreflight = HttpRequest.newBuilder(URI.create(baseUrl + "/documents/D-1/lock"))
+                .method("OPTIONS", HttpRequest.BodyPublishers.noBody())
+                .header("Origin", "http://localhost:8003")
+                .header("Access-Control-Request-Method", "POST")
+                .header("Access-Control-Request-Headers", "authorization,content-type")
+                .build();
+        assertEquals(200, httpClient.send(nestedPreflight, HttpResponse.BodyHandlers.ofString()).statusCode());
+    }
+
+    @Test
+    void registrationCannotEscalateToAdminRole() throws Exception {
+        HttpResponse<String> registerResponse = sendJson("POST", "/auth/register", """
+                {"username":"mallory","password":"pass123","role":"ADMIN"}
+                """, null);
+        assertEquals(201, registerResponse.statusCode());
+        Map<String, Object> registerData = map(jsonResponse(registerResponse).get("data"));
+        assertEquals("USER", registerData.get("role"));
+
+        String malloryToken = login("mallory", "pass123");
+        HttpResponse<String> meResponse = sendJson("GET", "/auth/me", null, malloryToken);
+        Map<String, Object> meData = map(jsonResponse(meResponse).get("data"));
+        assertEquals("USER", meData.get("role"));
+        assertFalse(meResponse.body().contains("password"), "User payload must never contain the password field");
+    }
+
+    @Test
+    void rollbackByNonOwnerIsForbiddenButAdminCanRollback() throws Exception {
+        String adminToken = login("admin", "123456");
+        registerAndLoginUser("alice", "pass123");
+        String aliceToken = login("alice", "pass123");
+
+        String documentId = uploadTextDocument(aliceToken, "alice-doc.md", "alice content");
+
+        HttpResponse<String> adminRollback = sendJson("POST",
+                "/documents/" + documentId + "/versions/V-1/rollback", "", adminToken);
+        assertEquals(200, adminRollback.statusCode());
+
+        registerAndLoginUser("bob", "pass123");
+        String bobToken = login("bob", "pass123");
+        HttpResponse<String> bobRollback = sendJson("POST",
+                "/documents/" + documentId + "/versions/V-1/rollback", "", bobToken);
+        Map<String, Object> bobJson = jsonResponse(bobRollback);
+        assertEquals(403, bobRollback.statusCode());
+        assertEquals("FORBIDDEN", bobJson.get("code"));
+    }
+
+    @Test
+    void loginResponseNeverExposesPasswordOrLogsToken() throws Exception {
+        HttpResponse<String> loginResponse = sendJson("POST", "/auth/login", """
+                {"username":"admin","password":"123456"}
+                """, null);
+        assertEquals(200, loginResponse.statusCode());
+        assertFalse(loginResponse.body().contains("\"password\""),
+                "Login payload must not contain a password field");
+        Map<String, Object> user = map(map(jsonResponse(loginResponse).get("data")).get("user"));
+        assertEquals("ADMIN", user.get("role"));
     }
 
     private HttpResponse<String> sendJson(String method, String path, String body, String token) throws IOException, InterruptedException {
@@ -271,11 +380,11 @@ class HttpApiServerTest {
     }
 
     private HttpResponse<byte[]> sendDownload(String path, String token) throws IOException, InterruptedException {
-        HttpRequest request = HttpRequest.newBuilder(URI.create(baseUrl + path))
-                .header("Authorization", "Bearer " + token)
-                .GET()
-                .build();
-        return httpClient.send(request, HttpResponse.BodyHandlers.ofByteArray());
+        HttpRequest.Builder builder = HttpRequest.newBuilder(URI.create(baseUrl + path)).GET();
+        if (token != null) {
+            builder.header("Authorization", "Bearer " + token);
+        }
+        return httpClient.send(builder.build(), HttpResponse.BodyHandlers.ofByteArray());
     }
 
     private void registerAndLoginUser(String username, String password) throws IOException, InterruptedException {
@@ -299,11 +408,15 @@ class HttpApiServerTest {
         return String.valueOf(map(map(uploadJson.get("data")).get("document")).get("documentId"));
     }
 
-    @SuppressWarnings("unchecked")
     private Map<String, Object> jsonResponse(HttpResponse<String> response) {
-        Map<String, Object> result = new HashMap<>(new com.google.gson.Gson().fromJson(response.body(), Map.class));
-        result.put("_status", response.statusCode());
-        return result;
+        try {
+            Map<String, Object> parsed = objectMapper.readValue(response.body(), new TypeReference<Map<String, Object>>() { });
+            Map<String, Object> result = new HashMap<>(parsed);
+            result.put("_status", response.statusCode());
+            return result;
+        } catch (IOException e) {
+            throw new IllegalStateException("Failed to parse JSON response: " + response.body(), e);
+        }
     }
 
     @SuppressWarnings("unchecked")

@@ -6,8 +6,9 @@
 
 - 前端入口：`frontend/index.html`
 - 前端脚本：`frontend/app.js`
-- API Base URL：`http://localhost:8082/api/v1`
-- 鉴权方式：`Authorization: Bearer <token>`
+- API Base URL：`http://localhost:8082/api/v1`（可通过 `window.SHAREDOC_API_BASE` 覆盖）
+- 鉴权方式：`Authorization: Bearer <token>`，会话使用滑动过期（默认 30 分钟，可配置）
+- 未认证请求会在 before 拦截阶段被直接拒绝（401 `AUTH_REQUIRED`），不会执行业务处理器
 - 实时同步：`GET /documents/{documentId}/events` 使用 SSE，前端也会把 token 作为查询参数传入
 
 统一响应结构：
@@ -52,10 +53,13 @@
   "token": "token-xxx",
   "user": {
     "userId": "U-ADMIN",
-    "username": "admin"
+    "username": "admin",
+    "role": "ADMIN"
   }
 }
 ```
+
+用户对象不会包含密码字段（服务端只存储 PBKDF2 哈希）。登录失败统一返回 `401 INVALID_CREDENTIALS`，不区分"用户不存在"和"密码错误"。
 
 ### `POST /auth/register`
 
@@ -64,10 +68,11 @@
 ```json
 {
   "username": "new-user",
-  "password": "123456",
-  "role": "USER"
+  "password": "123456"
 }
 ```
+
+注册账号的角色固定为 `USER`，请求中携带的 `role` 字段会被服务端忽略，无法通过注册获得管理员权限。
 
 ### `POST /auth/logout`
 
@@ -110,6 +115,12 @@ multipart/form-data
 字段：
 
 - `file`: 上传文件
+
+约束：
+
+- 文件名会被服务端净化（剥离目录部分、替换非法字符），防止路径穿越。
+- 文件大小默认上限 5 MB，超出返回 `413 FILE_TOO_LARGE`。
+- 只允许代码 / 配置 / 文档类扩展名，否则返回 `400 UNSUPPORTED_FILE_TYPE`。
 
 上传后会创建初始完整版本。
 
@@ -253,7 +264,7 @@ GET /documents/{documentId}/events?token=<token>
 
 说明：
 
-- `storageType=FULL` 表示该版本保存完整文件内容，通常用于上传版本和回滚版本。
+- `storageType=FULL` 表示该版本保存完整文件内容，用于上传版本、回滚版本，以及每累计 20 个连续 PATCH 版本后自动落盘的快照版本（保证历史重建成本有上界）。
 - `storageType=PATCH` 表示该版本只保存修改片段，物理文件通常是 `data/versions/{documentId}/V-x-{fileName}.patch.json`。
 - 同一用户在 60 秒内连续保存会合并为一个 PATCH 版本，`patchCount` 表示该版本包含的修改片段数量。
 - 合并版本的备注会按分号拆分并去重，历史弹窗也会对旧数据做展示去重。
@@ -294,13 +305,34 @@ GET /documents/{documentId}/events?token=<token>
 
 限制与同步行为：
 
+- 只有文档所有者或 `ADMIN` 角色可以回滚，其他用户会收到 `403 FORBIDDEN`。
 - 只要该文档存在任何活动或排队区间锁，回滚会返回 `409 ACTIVE_LOCKS_PRESENT`。
 - 回滚成功会创建一个新的 FULL 版本，不会删除历史版本。
 - 服务端会广播 `document-rolled-back`，其他在线用户收到后刷新当前文档内容。
 
-## 6. 前端对应关系
+## 6. 错误码
+
+HTTP 状态码由响应中的 `code` 字段决定（服务层与 HTTP 层通过错误码而非消息文本对接）：
+
+| code | HTTP 状态 | 含义 |
+| --- | --- | --- |
+| `AUTH_REQUIRED` | 401 | 未登录或会话已过期 |
+| `INVALID_CREDENTIALS` | 401 | 用户名或密码错误 |
+| `FORBIDDEN` | 403 | 没有执行该操作的权限（如非所有者回滚） |
+| `NO_EDIT_PERMISSION` | 403 | 没有目标区间的编辑权限 |
+| `DOCUMENT_NOT_FOUND` / `VERSION_NOT_FOUND` | 404 | 文档或版本不存在 |
+| `METHOD_NOT_ALLOWED` | 405 | 请使用 PATCH 进行局部保存 |
+| `REVISION_STALE` | 409 | 文档修订号已过期，需刷新 |
+| `USER_ALREADY_HAS_LOCK` | 409 | 当前用户已持有该文档的编辑区间 |
+| `LOCK_FAILED` / `INVALID_LOCK_RANGE` / `ACTIVE_LOCKS_PRESENT` | 409 | 锁冲突类错误 |
+| `FILE_TOO_LARGE` | 413 | 上传文件超过大小限制 |
+| `UNSUPPORTED_FILE_TYPE` / `USERNAME_TAKEN` / `BAD_REQUEST` | 400 | 请求参数错误 |
+| `INTERNAL_ERROR` | 500 | 服务器内部错误（详情只记录在服务端日志） |
+
+## 7. 前端对应关系
 
 - 登录页：`POST /auth/login`
+- 注册：`POST /auth/register`
 - 登录态恢复：`GET /auth/me`
 - 登出：`POST /auth/logout`
 - 文档列表：`GET /documents`

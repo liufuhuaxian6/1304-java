@@ -2,8 +2,10 @@ package com.sharedoc.service;
 
 import com.sharedoc.model.LockReleaseResult;
 import com.sharedoc.model.RangeLock;
+import com.sharedoc.server.ServerConfig;
 import com.sharedoc.util.IdGenerator;
 
+import java.time.Duration;
 import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -14,17 +16,31 @@ import java.util.Map;
 /**
  * Document range lock service.
  * Allows concurrent edits on non-overlapping ranges in the same document.
+ * Overlapping requests are queued FIFO and promoted when conflicts clear.
+ * Active locks expire after {@code lockTtl} so a vanished client (closed
+ * browser, lost connection) cannot block a range forever; queued requests
+ * get a fresh TTL when they are promoted to active.
  */
 public class LockService {
-    static final Map<String, List<RangeLock>> DOCUMENT_LOCKS = new HashMap<>();
-    static final Map<String, List<RangeLock>> DOCUMENT_LOCK_QUEUES = new HashMap<>();
+    private final Map<String, List<RangeLock>> documentLocks = new HashMap<>();
+    private final Map<String, List<RangeLock>> documentLockQueues = new HashMap<>();
+    private final Duration lockTtl;
+
+    public LockService() {
+        this(ServerConfig.LOCK_TTL);
+    }
+
+    public LockService(Duration lockTtl) {
+        this.lockTtl = lockTtl;
+    }
 
     public synchronized RangeLock tryLockRange(String documentId, String username, long revision, int start, int end) {
         if (documentId == null || username == null || username.isBlank() || start < 0 || end < start) {
             return null;
         }
+        expireStaleLocks(documentId);
 
-        List<RangeLock> locks = DOCUMENT_LOCKS.computeIfAbsent(documentId, key -> new ArrayList<>());
+        List<RangeLock> locks = documentLocks.computeIfAbsent(documentId, key -> new ArrayList<>());
         for (RangeLock lock : locks) {
             if (username.equals(lock.getOwner())) {
                 return null;
@@ -50,7 +66,8 @@ public class LockService {
     }
 
     public synchronized List<RangeLock> getQueuedLocks(String documentId) {
-        List<RangeLock> queuedLocks = DOCUMENT_LOCK_QUEUES.get(documentId);
+        expireStaleLocks(documentId);
+        List<RangeLock> queuedLocks = documentLockQueues.get(documentId);
         if (queuedLocks == null) {
             return new ArrayList<>();
         }
@@ -58,7 +75,8 @@ public class LockService {
     }
 
     public synchronized RangeLock getLockByOwner(String documentId, String username) {
-        List<RangeLock> locks = DOCUMENT_LOCKS.get(documentId);
+        expireStaleLocks(documentId);
+        List<RangeLock> locks = documentLocks.get(documentId);
         if (locks == null) {
             return null;
         }
@@ -71,7 +89,8 @@ public class LockService {
     }
 
     public synchronized RangeLock getLockById(String documentId, String lockId) {
-        List<RangeLock> locks = DOCUMENT_LOCKS.get(documentId);
+        expireStaleLocks(documentId);
+        List<RangeLock> locks = documentLocks.get(documentId);
         if (locks == null) {
             return null;
         }
@@ -84,13 +103,15 @@ public class LockService {
     }
 
     public synchronized boolean hasAnyLock(String documentId) {
-        List<RangeLock> locks = DOCUMENT_LOCKS.get(documentId);
-        List<RangeLock> queuedLocks = DOCUMENT_LOCK_QUEUES.get(documentId);
+        expireStaleLocks(documentId);
+        List<RangeLock> locks = documentLocks.get(documentId);
+        List<RangeLock> queuedLocks = documentLockQueues.get(documentId);
         return (locks != null && !locks.isEmpty()) || (queuedLocks != null && !queuedLocks.isEmpty());
     }
 
     public synchronized List<RangeLock> getActiveLocks(String documentId) {
-        List<RangeLock> locks = DOCUMENT_LOCKS.get(documentId);
+        expireStaleLocks(documentId);
+        List<RangeLock> locks = documentLocks.get(documentId);
         if (locks == null) {
             return new ArrayList<>();
         }
@@ -104,8 +125,9 @@ public class LockService {
     }
 
     public synchronized LockReleaseResult releaseLockByOwner(String documentId, String username) {
+        expireStaleLocks(documentId);
         List<RangeLock> released = new ArrayList<>();
-        List<RangeLock> locks = DOCUMENT_LOCKS.get(documentId);
+        List<RangeLock> locks = documentLocks.get(documentId);
 
         if (locks != null) {
             Iterator<RangeLock> iterator = locks.iterator();
@@ -117,10 +139,10 @@ public class LockService {
                 }
             }
             if (locks.isEmpty()) {
-                DOCUMENT_LOCKS.remove(documentId);
+                documentLocks.remove(documentId);
             }
         }
-        List<RangeLock> queuedLocks = DOCUMENT_LOCK_QUEUES.get(documentId);
+        List<RangeLock> queuedLocks = documentLockQueues.get(documentId);
         if (queuedLocks != null) {
             Iterator<RangeLock> queueIterator = queuedLocks.iterator();
             while (queueIterator.hasNext()) {
@@ -131,7 +153,7 @@ public class LockService {
                 }
             }
             if (queuedLocks.isEmpty()) {
-                DOCUMENT_LOCK_QUEUES.remove(documentId);
+                documentLockQueues.remove(documentId);
             } else {
                 updateQueuePositions(queuedLocks);
             }
@@ -140,30 +162,9 @@ public class LockService {
         return new LockReleaseResult(released, getVisibleLocks(documentId), promoted);
     }
 
-    public synchronized List<LockReleaseResult> releaseAllLocksHeldBy(String username) {
-        List<LockReleaseResult> results = new ArrayList<>();
-        if (username == null || username.isBlank()) {
-            return results;
-        }
-
-        List<String> documentIds = new ArrayList<>(DOCUMENT_LOCKS.keySet());
-        for (String documentId : DOCUMENT_LOCK_QUEUES.keySet()) {
-            if (!documentIds.contains(documentId)) {
-                documentIds.add(documentId);
-            }
-        }
-        for (String documentId : documentIds) {
-            LockReleaseResult result = releaseLockByOwner(documentId, username);
-            if (!result.getReleasedLocks().isEmpty()) {
-                results.add(result);
-            }
-        }
-        return results;
-    }
-
     public synchronized List<RangeLock> shiftLocksAfterEdit(String documentId, String savedLockId, int editStart, int editEnd, int delta) {
-        List<RangeLock> locks = DOCUMENT_LOCKS.get(documentId);
-        List<RangeLock> queuedLocks = DOCUMENT_LOCK_QUEUES.get(documentId);
+        List<RangeLock> locks = documentLocks.get(documentId);
+        List<RangeLock> queuedLocks = documentLockQueues.get(documentId);
         if (delta == 0) {
             return getVisibleLocks(documentId);
         }
@@ -184,8 +185,39 @@ public class LockService {
         return getVisibleLocks(documentId);
     }
 
+    /**
+     * Removes active locks older than the TTL and promotes queued requests
+     * into the freed ranges. Queued entries are not expired here: they get
+     * a fresh {@code acquiredAt} when promoted, so an abandoned queue entry
+     * is eventually promoted and then expired by the same mechanism.
+     */
+    private void expireStaleLocks(String documentId) {
+        List<RangeLock> locks = documentLocks.get(documentId);
+        if (locks == null || locks.isEmpty()) {
+            return;
+        }
+
+        LocalDateTime cutoff = LocalDateTime.now().minus(lockTtl);
+        boolean removedAny = false;
+        Iterator<RangeLock> iterator = locks.iterator();
+        while (iterator.hasNext()) {
+            RangeLock lock = iterator.next();
+            if (lock.getAcquiredAt() != null && lock.getAcquiredAt().isBefore(cutoff)) {
+                iterator.remove();
+                removedAny = true;
+            }
+        }
+        if (!removedAny) {
+            return;
+        }
+        if (locks.isEmpty()) {
+            documentLocks.remove(documentId);
+        }
+        promoteQueuedLocks(documentId);
+    }
+
     private RangeLock enqueueLock(String documentId, String username, long revision, int start, int end) {
-        List<RangeLock> queuedLocks = DOCUMENT_LOCK_QUEUES.computeIfAbsent(documentId, key -> new ArrayList<>());
+        List<RangeLock> queuedLocks = documentLockQueues.computeIfAbsent(documentId, key -> new ArrayList<>());
         for (RangeLock queuedLock : queuedLocks) {
             if (username.equals(queuedLock.getOwner())) {
                 return copyLock(queuedLock);
@@ -211,12 +243,12 @@ public class LockService {
 
     private List<RangeLock> promoteQueuedLocks(String documentId) {
         List<RangeLock> promoted = new ArrayList<>();
-        List<RangeLock> queuedLocks = DOCUMENT_LOCK_QUEUES.get(documentId);
+        List<RangeLock> queuedLocks = documentLockQueues.get(documentId);
         if (queuedLocks == null || queuedLocks.isEmpty()) {
             return promoted;
         }
 
-        List<RangeLock> activeLocks = DOCUMENT_LOCKS.computeIfAbsent(documentId, key -> new ArrayList<>());
+        List<RangeLock> activeLocks = documentLocks.computeIfAbsent(documentId, key -> new ArrayList<>());
         Iterator<RangeLock> iterator = queuedLocks.iterator();
         while (iterator.hasNext()) {
             RangeLock queuedLock = iterator.next();
@@ -232,9 +264,12 @@ public class LockService {
         }
 
         if (queuedLocks.isEmpty()) {
-            DOCUMENT_LOCK_QUEUES.remove(documentId);
+            documentLockQueues.remove(documentId);
         } else {
             updateQueuePositions(queuedLocks);
+        }
+        if (activeLocks.isEmpty()) {
+            documentLocks.remove(documentId);
         }
         return promoted;
     }

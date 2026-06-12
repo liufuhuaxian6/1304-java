@@ -1,15 +1,19 @@
 package com.sharedoc.service;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.sharedoc.model.Document;
 import com.sharedoc.model.DocumentVersion;
+import com.sharedoc.model.ErrorCodes;
 import com.sharedoc.model.OperationType;
 import com.sharedoc.model.Response;
 import com.sharedoc.model.VersionPatch;
 import com.sharedoc.storage.VersionStorage;
-import com.google.gson.Gson;
-import com.google.gson.reflect.TypeToken;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
-import java.lang.reflect.Type;
+import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.time.LocalDateTime;
@@ -20,32 +24,41 @@ import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 
 /**
- * Version service skeleton.
- * Records version metadata and delegates version file path handling to VersionStorage.
+ * Version service.
+ * Stores version metadata in memory and version content on disk.
+ *
+ * Storage strategy:
+ * - Upload and rollback versions are FULL snapshots of the document.
+ * - Edit versions are PATCH records (range, original text, replacement text).
+ * - Rapid consecutive edits by the same user are merged into one PATCH version.
+ * - After {@link #SNAPSHOT_INTERVAL} consecutive PATCH versions, the next edit
+ *   is stored as a FULL snapshot so reconstruction never replays an unbounded
+ *   patch chain.
  */
 public class VersionService {
+    private static final Logger LOGGER = LoggerFactory.getLogger(VersionService.class);
     private static final String STORAGE_FULL = "FULL";
     private static final String STORAGE_PATCH = "PATCH";
     private static final Duration EDIT_MERGE_WINDOW = Duration.ofSeconds(60);
-    private static final Type PATCH_LIST_TYPE = new TypeToken<List<VersionPatch>>() { }.getType();
-    private static final Map<String, List<DocumentVersion>> VERSION_MAP = new ConcurrentHashMap<>();
-    private static final Object VERSION_LOCK = new Object();
+    private static final int SNAPSHOT_INTERVAL = 20;
+    private static final ObjectMapper PATCH_MAPPER = new ObjectMapper();
+    private static final TypeReference<List<VersionPatch>> PATCH_LIST_TYPE = new TypeReference<>() { };
 
+    private final Map<String, List<DocumentVersion>> versionMap = new ConcurrentHashMap<>();
+    private final Object versionLock = new Object();
     private final VersionStorage versionStorage = new VersionStorage();
-    private final Gson gson = new Gson();
 
     public Response createInitialVersion(String documentId, String fileName, String username, String sourcePath) {
         return createVersion(documentId, fileName, username, sourcePath, OperationType.UPLOAD, "初始上传版本");
     }
 
-    public Response createEditVersion(String documentId, String fileName, String username, String sourcePath, String comment) {
-        String versionComment = normalizeComment(comment, "编辑保存版本");
-        return createVersion(documentId, fileName, username, sourcePath, OperationType.EDIT, versionComment);
-    }
-
+    /**
+     * Records one range edit. {@code contentAfterEdit} is the full document text
+     * after the edit; it is used when this version is stored as a FULL snapshot.
+     */
     public Response createEditVersion(String documentId, String fileName, String username, int start, int end,
                                       String originalText, String replacementText, long revisionBefore,
-                                      long revisionAfter, String comment) {
+                                      long revisionAfter, String comment, String contentAfterEdit) {
         if (replacementText == null) {
             return Response.fail("替换内容不能为空");
         }
@@ -54,7 +67,7 @@ public class VersionService {
         }
 
         String versionComment = normalizeComment(comment, "编辑保存版本");
-        synchronized (VERSION_LOCK) {
+        synchronized (versionLock) {
             try {
                 VersionPatch patch = new VersionPatch(
                         username,
@@ -67,15 +80,21 @@ public class VersionService {
                         versionComment
                 );
                 DocumentVersion version = findMergeTarget(documentId, username, OperationType.EDIT);
-                if (version == null) {
-                    version = createPatchVersion(documentId, fileName, username, versionComment, patch);
-                    VERSION_MAP.computeIfAbsent(documentId, key -> new ArrayList<>()).add(version);
-                } else {
+                if (version != null) {
                     appendPatch(version, patch, versionComment);
+                    return new Response(true, "版本记录创建成功", version);
                 }
+
+                if (contentAfterEdit != null && patchVersionsSinceLastFull(documentId) >= SNAPSHOT_INTERVAL - 1) {
+                    version = createSnapshotVersion(documentId, fileName, username, versionComment, contentAfterEdit);
+                } else {
+                    version = createPatchVersion(documentId, fileName, username, versionComment, patch);
+                }
+                versionMap.computeIfAbsent(documentId, key -> new ArrayList<>()).add(version);
                 return new Response(true, "版本记录创建成功", version);
             } catch (Exception e) {
-                return Response.fail("版本记录创建失败: " + e.getMessage());
+                LOGGER.error("Failed to create edit version, documentId={}", documentId, e);
+                return Response.fail(ErrorCodes.INTERNAL_ERROR, "版本记录创建失败");
             }
         }
     }
@@ -85,8 +104,8 @@ public class VersionService {
             return Response.fail("文档ID不能为空");
         }
 
-        synchronized (VERSION_LOCK) {
-            List<DocumentVersion> versions = VERSION_MAP.getOrDefault(documentId, new ArrayList<>());
+        synchronized (versionLock) {
+            List<DocumentVersion> versions = versionMap.getOrDefault(documentId, new ArrayList<>());
             return new Response(true, "历史版本列表获取成功", new ArrayList<>(versions));
         }
     }
@@ -99,19 +118,22 @@ public class VersionService {
             return Response.fail("版本ID不能为空");
         }
 
-        DocumentVersion version = findVersionById(documentId, versionId);
-        if (version == null) {
-            return Response.fail("历史版本不存在或不属于当前文档");
-        }
+        synchronized (versionLock) {
+            DocumentVersion version = findVersionById(documentId, versionId);
+            if (version == null) {
+                return Response.fail(ErrorCodes.VERSION_NOT_FOUND, "历史版本不存在或不属于当前文档");
+            }
 
-        try {
-            byte[] fileContent = reconstructVersionContent(version).getBytes(StandardCharsets.UTF_8);
-            Map<String, Object> result = new HashMap<>();
-            result.put("version", version);
-            result.put("fileContent", fileContent);
-            return new Response(true, "历史版本下载成功", result);
-        } catch (Exception e) {
-            return Response.fail("历史版本下载失败: " + e.getMessage());
+            try {
+                byte[] fileContent = reconstructVersionContent(version).getBytes(StandardCharsets.UTF_8);
+                Map<String, Object> result = new HashMap<>();
+                result.put("version", version);
+                result.put("fileContent", fileContent);
+                return new Response(true, "历史版本下载成功", result);
+            } catch (Exception e) {
+                LOGGER.error("Failed to download version {} of document {}", versionId, documentId, e);
+                return Response.fail(ErrorCodes.INTERNAL_ERROR, "历史版本下载失败");
+            }
         }
     }
 
@@ -123,8 +145,8 @@ public class VersionService {
             return Response.fail("版本ID不能为空");
         }
 
-        synchronized (VERSION_LOCK) {
-            List<DocumentVersion> versions = VERSION_MAP.getOrDefault(documentId, new ArrayList<>());
+        synchronized (versionLock) {
+            List<DocumentVersion> versions = versionMap.getOrDefault(documentId, new ArrayList<>());
             for (int index = 0; index < versions.size(); index += 1) {
                 DocumentVersion version = versions.get(index);
                 if (!versionId.equals(version.getVersionId())) {
@@ -140,52 +162,52 @@ public class VersionService {
                     result.put("changes", buildVersionChanges(version, previousContent, currentContent));
                     return new Response(true, "版本差异获取成功", result);
                 } catch (Exception e) {
-                    return Response.fail("版本差异获取失败: " + e.getMessage());
+                    LOGGER.error("Failed to diff version {} of document {}", versionId, documentId, e);
+                    return Response.fail(ErrorCodes.INTERNAL_ERROR, "版本差异获取失败");
                 }
             }
         }
-        return Response.fail("历史版本不存在或不属于当前文档");
-    }
-
-    public Response rollbackToVersion(String documentId, String versionId) {
-        return Response.fail("版本回滚需要文档当前路径，请通过文档服务发起回滚");
+        return Response.fail(ErrorCodes.VERSION_NOT_FOUND, "历史版本不存在或不属于当前文档");
     }
 
     public Response rollbackToVersion(Document document, String versionId, String username) {
         if (document == null) {
-            return Response.fail("文档不存在");
+            return Response.fail(ErrorCodes.DOCUMENT_NOT_FOUND, "文档不存在");
         }
         if (versionId == null || versionId.isBlank()) {
             return Response.fail("版本ID不能为空");
         }
 
-        DocumentVersion sourceVersion = findVersionById(document.getDocumentId(), versionId);
-        if (sourceVersion == null) {
-            return Response.fail("历史版本不存在或不属于当前文档");
-        }
-
-        try {
-            String targetContent = reconstructVersionContent(sourceVersion);
-            versionStorage.overwriteVersionText(document.getCurrentPath(), targetContent);
-            Response rollbackResponse = createVersion(
-                    document.getDocumentId(),
-                    document.getFileName(),
-                    username,
-                    document.getCurrentPath(),
-                    OperationType.ROLLBACK,
-                    "回滚到版本 " + versionId
-            );
-            if (!rollbackResponse.isSuccess()) {
-                return rollbackResponse;
+        synchronized (versionLock) {
+            DocumentVersion sourceVersion = findVersionById(document.getDocumentId(), versionId);
+            if (sourceVersion == null) {
+                return Response.fail(ErrorCodes.VERSION_NOT_FOUND, "历史版本不存在或不属于当前文档");
             }
 
-            Map<String, Object> result = new HashMap<>();
-            result.put("document", document);
-            result.put("rolledBackFrom", sourceVersion);
-            result.put("rollbackVersion", rollbackResponse.getData());
-            return new Response(true, "版本回滚成功", result);
-        } catch (Exception e) {
-            return Response.fail("版本回滚失败: " + e.getMessage());
+            try {
+                String targetContent = reconstructVersionContent(sourceVersion);
+                versionStorage.overwriteVersionText(document.getCurrentPath(), targetContent);
+                Response rollbackResponse = createVersion(
+                        document.getDocumentId(),
+                        document.getFileName(),
+                        username,
+                        document.getCurrentPath(),
+                        OperationType.ROLLBACK,
+                        "回滚到版本 " + versionId
+                );
+                if (!rollbackResponse.isSuccess()) {
+                    return rollbackResponse;
+                }
+
+                Map<String, Object> result = new HashMap<>();
+                result.put("document", document);
+                result.put("rolledBackFrom", sourceVersion);
+                result.put("rollbackVersion", rollbackResponse.getData());
+                return new Response(true, "版本回滚成功", result);
+            } catch (Exception e) {
+                LOGGER.error("Failed to rollback document {} to version {}", document.getDocumentId(), versionId, e);
+                return Response.fail(ErrorCodes.INTERNAL_ERROR, "版本回滚失败");
+            }
         }
     }
 
@@ -204,7 +226,7 @@ public class VersionService {
             return Response.fail("源文件路径不能为空");
         }
 
-        synchronized (VERSION_LOCK) {
+        synchronized (versionLock) {
             try {
                 String versionId = nextVersionId(documentId);
                 String versionPath = versionStorage.saveVersionFile(sourcePath, documentId, versionId, fileName);
@@ -219,33 +241,32 @@ public class VersionService {
                 );
                 version.setStorageType(STORAGE_FULL);
                 version.setPatchCount(0);
-                VERSION_MAP.computeIfAbsent(documentId, key -> new ArrayList<>()).add(version);
+                versionMap.computeIfAbsent(documentId, key -> new ArrayList<>()).add(version);
                 return new Response(true, "版本记录创建成功", version);
             } catch (Exception e) {
-                return Response.fail("版本记录创建失败: " + e.getMessage());
+                LOGGER.error("Failed to create version for document {}", documentId, e);
+                return Response.fail(ErrorCodes.INTERNAL_ERROR, "版本记录创建失败");
             }
         }
     }
 
     private DocumentVersion findVersionById(String documentId, String versionId) {
-        synchronized (VERSION_LOCK) {
-            List<DocumentVersion> versions = VERSION_MAP.getOrDefault(documentId, new ArrayList<>());
-            for (DocumentVersion version : versions) {
-                if (versionId.equals(version.getVersionId())) {
-                    return version;
-                }
+        List<DocumentVersion> versions = versionMap.getOrDefault(documentId, new ArrayList<>());
+        for (DocumentVersion version : versions) {
+            if (versionId.equals(version.getVersionId())) {
+                return version;
             }
-            return null;
         }
+        return null;
     }
 
     private String nextVersionId(String documentId) {
-        List<DocumentVersion> versions = VERSION_MAP.getOrDefault(documentId, new ArrayList<>());
+        List<DocumentVersion> versions = versionMap.getOrDefault(documentId, new ArrayList<>());
         return "V-" + (versions.size() + 1);
     }
 
     private DocumentVersion findMergeTarget(String documentId, String username, OperationType operationType) {
-        List<DocumentVersion> versions = VERSION_MAP.getOrDefault(documentId, new ArrayList<>());
+        List<DocumentVersion> versions = versionMap.getOrDefault(documentId, new ArrayList<>());
         if (versions.isEmpty()) {
             return null;
         }
@@ -262,6 +283,19 @@ public class VersionService {
             return null;
         }
         return latest;
+    }
+
+    private int patchVersionsSinceLastFull(String documentId) {
+        List<DocumentVersion> versions = versionMap.getOrDefault(documentId, new ArrayList<>());
+        int count = 0;
+        for (int index = versions.size() - 1; index >= 0; index -= 1) {
+            if (STORAGE_PATCH.equals(versions.get(index).getStorageType())) {
+                count += 1;
+            } else {
+                break;
+            }
+        }
+        return count;
     }
 
     private DocumentVersion createPatchVersion(String documentId, String fileName, String username,
@@ -287,6 +321,24 @@ public class VersionService {
         return version;
     }
 
+    private DocumentVersion createSnapshotVersion(String documentId, String fileName, String username,
+                                                  String comment, String content) {
+        String versionId = nextVersionId(documentId);
+        String versionPath = versionStorage.saveVersionText(documentId, versionId, fileName, content);
+        DocumentVersion version = new DocumentVersion(
+                versionId,
+                documentId,
+                fileName,
+                username,
+                OperationType.EDIT,
+                versionPath,
+                comment
+        );
+        version.setStorageType(STORAGE_FULL);
+        version.setPatchCount(0);
+        return version;
+    }
+
     private void appendPatch(DocumentVersion version, VersionPatch patch, String comment) {
         List<VersionPatch> patches = readPatches(version);
         patches.add(patch);
@@ -296,20 +348,43 @@ public class VersionService {
         version.setComment(mergeComments(version.getComment(), comment));
     }
 
+    /**
+     * Rebuilds the document text as of {@code targetVersion}.
+     * Replay starts from the latest FULL snapshot at or before the target,
+     * so cost is bounded by the snapshot interval rather than total history.
+     * Must be called while holding {@code versionLock}.
+     */
     private String reconstructVersionContent(DocumentVersion targetVersion) {
-        List<DocumentVersion> versions = VERSION_MAP.getOrDefault(targetVersion.getDocumentId(), new ArrayList<>());
+        List<DocumentVersion> versions = versionMap.getOrDefault(targetVersion.getDocumentId(), new ArrayList<>());
+        int targetIndex = -1;
+        for (int index = 0; index < versions.size(); index += 1) {
+            if (versions.get(index).getVersionId().equals(targetVersion.getVersionId())) {
+                targetIndex = index;
+                break;
+            }
+        }
+        if (targetIndex < 0) {
+            throw new IllegalStateException("Version not found in document history: " + targetVersion.getVersionId());
+        }
+
+        int startIndex = 0;
+        for (int index = targetIndex; index >= 0; index -= 1) {
+            if (!STORAGE_PATCH.equals(versions.get(index).getStorageType())) {
+                startIndex = index;
+                break;
+            }
+        }
+
         String content = "";
-        for (DocumentVersion version : versions) {
+        for (int index = startIndex; index <= targetIndex; index += 1) {
+            DocumentVersion version = versions.get(index);
             if (STORAGE_PATCH.equals(version.getStorageType())) {
                 content = applyPatches(content, readPatches(version));
             } else {
                 content = versionStorage.readVersionText(version.getVersionPath());
             }
-            if (version.getVersionId().equals(targetVersion.getVersionId())) {
-                return content;
-            }
         }
-        throw new IllegalStateException("Version not found in document history: " + targetVersion.getVersionId());
+        return content;
     }
 
     private String applyPatches(String content, List<VersionPatch> patches) {
@@ -403,12 +478,21 @@ public class VersionService {
     }
 
     private List<VersionPatch> readPatches(DocumentVersion version) {
-        List<VersionPatch> patches = gson.fromJson(versionStorage.readVersionText(version.getVersionPath()), PATCH_LIST_TYPE);
-        return patches == null ? new ArrayList<>() : new ArrayList<>(patches);
+        try {
+            List<VersionPatch> patches = PATCH_MAPPER.readValue(
+                    versionStorage.readVersionText(version.getVersionPath()), PATCH_LIST_TYPE);
+            return patches == null ? new ArrayList<>() : new ArrayList<>(patches);
+        } catch (IOException e) {
+            throw new IllegalStateException("Failed to parse patch file: " + version.getVersionPath(), e);
+        }
     }
 
     private String serializePatches(List<VersionPatch> patches) {
-        return gson.toJson(patches);
+        try {
+            return PATCH_MAPPER.writeValueAsString(patches);
+        } catch (JsonProcessingException e) {
+            throw new IllegalStateException("Failed to serialize patches", e);
+        }
     }
 
     private String normalizeComment(String comment, String defaultComment) {

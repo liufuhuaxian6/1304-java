@@ -1,11 +1,14 @@
 package com.sharedoc.model;
 
+import com.fasterxml.jackson.annotation.JsonIgnore;
+
 import java.io.Serial;
 import java.io.Serializable;
 
 /**
  * User entity.
  * Stores basic account information used by the server during login and access checks.
+ * The password field holds a PBKDF2 hash and is never serialized to clients.
  */
 public class User implements Serializable {
     @Serial
@@ -43,6 +46,7 @@ public class User implements Serializable {
         this.username = username;
     }
 
+    @JsonIgnore
     public String getPassword() {
         return password;
     }

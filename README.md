@@ -2,156 +2,179 @@
 
 ## 项目简介
 
-这是一个基于 Java 17、Javalin 和原生 HTML 前端的共享编辑系统。
+这是一个基于 Java 17、Javalin 和原生 HTML 前端的多人共享编辑系统。
 
 系统当前只保留 Web 访问方式：
 
-- 后端提供 HTTP REST API
-- 前端使用 `frontend/index.html` + `frontend/app.js`
-- 文档内容存储在本地文件系统
-- 用户、在线状态和编辑锁保存在内存中
+- 后端提供 HTTP REST API + SSE 实时事件
+- 前端使用 `frontend/index.html` + `frontend/app.js`（Vue 3 CDN）
+- 文档内容和历史版本存储在本地文件系统
+- 用户、会话、在线状态和编辑锁保存在内存中
 
-当前已实现的核心能力：
+## 功能总览
 
-- 登录 / 登出 / 注册
+### 账号与会话
+
+- 登录 / 登出 / 注册（前端登录页提供注册入口）
+- 密码以 PBKDF2（HmacSHA256，65536 轮加盐）哈希存储，服务端不保存明文，接口响应中永不包含密码字段
+- 注册账号固定为 `USER` 角色，无法通过注册获得管理员权限
+- 登录失败统一提示"用户名或密码错误"，不暴露用户名是否存在
+- 会话 token 使用滑动过期（默认 30 分钟），过期后自动失效
+- 登出会自动释放当前用户持有或排队中的全部编辑锁
+
+### 文档管理
+
 - 文档列表、上传、下载、在线预览
-- 细粒度区间锁控制，不同用户可并行编辑同一文档的不重叠区间
-- 局部内容保存与 SSE 实时同步
-- 增量版本存储：初始版本保存完整快照，编辑版本只保存修改片段
-- 单位时间内同一用户的连续编辑会合并为一个 PATCH 版本以节省空间
-- 历史版本列表、下载、差异查看、回滚；回滚后其他在线用户会同步刷新文档
+- 上传文件名经过净化（剥离目录部分、过滤非法字符与控制字符），防止路径穿越
+- 上传大小限制（默认 5 MB）与文件类型白名单
+- 下载使用 RFC 5987 编码的 `Content-Disposition`，中文文件名可正常下载
+
+### 协同编辑
+
+- 细粒度区间锁：不同用户可并行编辑同一文档的不重叠区间
+- 重叠区间进入 FIFO 等待队列，前序锁释放后自动晋升并通过 SSE 通知
+- 活动锁带 TTL（默认 10 分钟）：浏览器异常关闭、断网等情况下的“僵尸锁”会自动过期释放，不会永久阻塞他人编辑
+- 局部内容保存（PATCH，只提交锁区间文本），保存后其他锁坐标自动平移
+- SSE 推送：锁申请 / 释放 / 排队晋升、内容局部更新、版本回滚
+
+### 版本控制
+
+- 初始上传与回滚保存完整快照（FULL），普通编辑只保存修改片段（PATCH）
+- 同一用户 60 秒内的连续编辑合并为一个 PATCH 版本以节省空间
+- 每累计 20 个连续 PATCH 版本自动落一个 FULL 快照，版本重建从最近的快照开始重放，成本有上界
+- 历史版本列表、下载、相邻版本差异查看
+- 版本回滚：仅文档所有者或 `ADMIN` 可回滚；存在活动锁时禁止回滚；回滚生成新版本并同步刷新其他在线用户
+
+### 安全设计
+
+- 认证拦截在 Javalin `before` 处理器中通过抛出 `UnauthorizedResponse` 中断请求管线，未认证请求不会执行任何业务处理器（有专门的回归测试覆盖"401 不泄露响应体"）
+- 服务层返回机器可读错误码（`ErrorCodes`），HTTP 层按错误码映射状态码，不做消息文本匹配
+- 服务端异常只记录日志，对客户端返回通用错误信息，不泄露内部路径和堆栈
+- CORS 默认仅允许 `http://localhost:8003` / `http://127.0.0.1:8003`，可通过环境变量配置
+- 日志不记录 token 与密码
 
 ## 技术栈
 
-- Java 17
-- Maven
-- Javalin 5
-- Gson / Jackson
-- Vue 3 CDN
-- Tailwind CSS CDN
+- Java 17 / Maven
+- Javalin 5（Jetty 11）
+- Jackson（统一的 JSON 序列化，含 JSR-310 日期支持）
+- SLF4J + slf4j-simple
+- Vue 3 CDN + Tailwind CSS CDN + highlight.js
+- JUnit 5
 
 ## 项目结构
 
 ```text
 .
 ├── frontend
-│   ├── index.html
-│   └── app.js
+│   ├── index.html          # 登录/注册、文档列表、编辑器、历史版本弹窗
+│   └── app.js              # Vue 3 应用：锁管理、自动保存、SSE 同步、坐标映射
 ├── data
-│   ├── documents
-│   └── versions
+│   ├── documents           # 当前文档文件（运行时生成）
+│   └── versions            # 历史版本文件（FULL 快照 + *.patch.json）
 ├── src
-│   ├── main
-│   │   └── java/com/sharedoc
-│   │       ├── model
-│   │       ├── server
-│   │       ├── service
-│   │       ├── storage
-│   │       └── util
-│   └── test
-│       └── java/com/sharedoc
+│   ├── main/java/com/sharedoc
+│   │   ├── model           # Document / DocumentVersion / RangeLock / Response / ErrorCodes ...
+│   │   ├── server          # HttpApiServer / DocumentEventBroker / ServerConfig / ServerMain
+│   │   ├── service         # DocumentService / LockService / VersionService / UserService
+│   │   ├── storage         # FileStorage / VersionStorage
+│   │   └── util            # PasswordHasher / FileNames / IdGenerator / DateTimeUtil
+│   └── test/java/com/sharedoc
+│       ├── server          # HTTP 冒烟流程 + 安全回归测试（越权、提权、回滚权限）
+│       ├── service         # 文档 / 锁（含 TTL 过期）/ 版本（含快照策略）/ 用户测试
+│       └── testutil        # 测试状态重置工具
 └── pom.xml
 ```
 
-## 后端启动
+## 架构说明
 
-编译项目：
+- **服务装配**：所有服务均为实例状态（无静态可变共享状态），由 `ServerMain` 显式装配；`DocumentService` 与 HTTP 层共享同一个 `VersionService` / `LockService` 实例。测试通过创建全新实例获得隔离，不再依赖反射清理。
+- **并发模型**：同一文档的所有操作通过每文档监视器（per-document monitor）串行化；`LockService` 内部用 `synchronized` 保护锁表并在每次访问时清理过期锁。
+- **保存一致性**：保存流程为"写文件 → 记版本"，版本记录失败时会把文件内容恢复为保存前状态，保证磁盘内容与版本历史不会发散。
+
+## 配置
+
+所有配置都有默认值，可通过环境变量覆盖：
+
+| 环境变量 | 默认值 | 说明 |
+| --- | --- | --- |
+| `SHAREDOC_HTTP_PORT` | `8082` | HTTP 监听端口 |
+| `SHAREDOC_DOCUMENT_DIR` | `data/documents` | 当前文档存储目录 |
+| `SHAREDOC_VERSION_DIR` | `data/versions` | 历史版本存储目录 |
+| `SHAREDOC_SESSION_TTL_MINUTES` | `30` | 会话滑动过期时间（分钟） |
+| `SHAREDOC_LOCK_TTL_MINUTES` | `10` | 编辑锁过期时间（分钟） |
+| `SHAREDOC_MAX_UPLOAD_BYTES` | `5242880` | 上传大小上限（字节） |
+| `SHAREDOC_CORS_ORIGINS` | `http://localhost:8003,http://127.0.0.1:8003` | 允许的跨域来源，逗号分隔，`*` 表示全部放开（仅限开发） |
+
+前端 API 地址默认 `http://localhost:8082/api/v1`，可在加载 `app.js` 之前设置 `window.SHAREDOC_API_BASE` 覆盖。
+
+## 后端启动
 
 ```powershell
 mvn clean compile
-```
-
-启动后端：
-
-```powershell
 mvn exec:java "-Dexec.mainClass=com.sharedoc.server.ServerMain"
 ```
 
-后端默认监听：
-
-- HTTP API: `http://localhost:8082`
+后端默认监听 `http://localhost:8082`。
 
 ## 前端启动
 
-前端是静态页面，需要一个简单静态服务器。
-
-进入前端目录：
+前端是静态页面，需要一个静态服务器（默认 CORS 配置允许 8003 端口）：
 
 ```bash
 cd frontend
-```
-
-如果本机有 Python：
-
-```bash
 python -m http.server 8003
 ```
 
-然后打开：
-
-```text
-http://localhost:8003/
-```
-
-前端默认请求：
-
-```text
-http://localhost:8082/api/v1
-```
+然后打开 `http://localhost:8003/`。
 
 ## 默认测试账号
 
-- `admin / 123456`
-- `user / 123456`
+- `admin / 123456`（ADMIN 角色，可回滚任意文档）
+- `user / 123456`（USER 角色）
 
-这些账号定义在 `src/main/java/com/sharedoc/service/UserService.java` 中，服务重启后内存状态会重置。
+账号定义在 `UserService` 构造函数中，密码以 PBKDF2 哈希形式存储；服务重启后内存状态会重置。新账号可通过登录页的"立即注册"入口创建。
 
 ## 主要接口
 
-- `POST /api/v1/auth/login`
-- `POST /api/v1/auth/register`
-- `POST /api/v1/auth/logout`
-- `GET /api/v1/auth/me`
-- `GET /api/v1/documents`
-- `POST /api/v1/documents`
-- `GET /api/v1/documents/{id}/preview`
-- `GET /api/v1/documents/{id}/download`
-- `POST /api/v1/documents/{id}/lock`
-- `DELETE /api/v1/documents/{id}/lock`
-- `PATCH /api/v1/documents/{id}/content`
-- `GET /api/v1/documents/{id}/events`
-- `GET /api/v1/documents/{id}/versions`
-- `GET /api/v1/documents/{id}/versions/{versionId}/diff`
-- `GET /api/v1/documents/{id}/versions/{versionId}/download`
-- `POST /api/v1/documents/{id}/versions/{versionId}/rollback`
+- `POST /api/v1/auth/login` — 登录，返回 token 与用户信息（含角色）
+- `POST /api/v1/auth/register` — 注册（角色固定为 USER）
+- `POST /api/v1/auth/logout` — 登出并释放编辑锁
+- `GET /api/v1/auth/me` — 当前用户信息
+- `GET /api/v1/documents` — 文档列表
+- `POST /api/v1/documents` — 上传（multipart，大小/类型/文件名校验）
+- `GET /api/v1/documents/{id}/preview` — 在线预览
+- `GET /api/v1/documents/{id}/content` — 编辑器全文加载
+- `GET /api/v1/documents/{id}/download` — 下载当前文档
+- `POST /api/v1/documents/{id}/lock` — 申请区间锁
+- `DELETE /api/v1/documents/{id}/lock` — 释放区间锁
+- `PATCH /api/v1/documents/{id}/content` — 局部保存
+- `GET /api/v1/documents/{id}/events` — SSE 实时事件
+- `GET /api/v1/documents/{id}/versions` — 历史版本列表
+- `GET /api/v1/documents/{id}/versions/{versionId}/diff` — 版本差异
+- `GET /api/v1/documents/{id}/versions/{versionId}/download` — 版本下载
+- `POST /api/v1/documents/{id}/versions/{versionId}/rollback` — 版本回滚（owner/ADMIN）
 
-接口说明见 [frontend-api-design.md](./frontend-api-design.md)。
-
-## 编辑与版本说明
-
-- 前端根据光标或选区申请行级扩展后的区间锁，锁响应包含 `lockId`、`start`、`end`、`revision`、`queued`、`queuePosition` 和当前活动锁列表。
-- 保存使用 `PATCH /content`，请求只提交当前锁区间的新文本，服务端按锁的最新区间写回并释放锁。
-- 文档事件通过 `GET /events` 的 SSE 推送，包括锁申请/释放、内容局部更新、队列晋升和版本回滚。
-- `data/versions/` 中上传和回滚版本保存为完整文件；普通编辑版本保存为 `*.patch.json`，其中记录 `start/end`、原文本、新文本和修订号。
-- 历史版本弹窗点击版本行会请求 `/versions/{versionId}/diff`，显示该版本相对上一版本的新增、删除或替换内容。
+完整请求/响应格式与错误码表见 [frontend-api-design.md](./frontend-api-design.md)。
 
 ## 测试
-
-运行全部测试：
 
 ```bash
 mvn test
 ```
 
-当前测试覆盖：
+当前共 36 个测试，覆盖：
 
-- 文档服务
-- 用户服务
-- HTTP API 冒烟流程
+- 文档服务：上传 / 预览 / 下载、区间锁并行与排队晋升、坐标平移、补丁合并、并发保存串行化、回滚权限、文件名路径穿越净化、上传大小限制
+- 锁服务：过期锁自动释放、过期后排队锁晋升
+- 版本服务：长补丁链自动快照与重建正确性
+- 用户服务：登录 / 注册 / 登出释放锁、角色固定 USER、密码不外泄
+- HTTP 层：完整冒烟流程、未认证请求 401 且不泄露数据（回归测试）、注册无法提权、非所有者回滚 403、登录响应不含密码
 
 ## 当前限制
 
-- 用户数据未持久化，重启后会恢复默认账号
-- 编辑锁保存在内存中，服务重启后会清空
+- 用户、文档元数据和编辑锁保存在内存中，服务重启后会重置（文档与版本文件仍保留在 `data/` 目录下，但重启后不会自动加载）
+- 单节点部署，未考虑多实例横向扩展
 - 前端是静态页面，需要单独启动静态文件服务
-- 暂未接入数据库和更完整的会话超时机制
+- 版本差异展示使用前后缀对比 / 补丁片段，不是完整的 Myers diff
+- 中文输入法（IME）合成输入在区间锁边界处的行为未做专门处理
