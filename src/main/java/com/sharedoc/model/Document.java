@@ -20,6 +20,8 @@ public class Document implements Serializable {
     private LocalDateTime lastModifiedTime;
     private String editingUser;
     private LocalDateTime editingStartTime;
+    private long revision;
+    private int activeLockCount;
 
     public Document() {
         // TODO: Keep default constructor for serialization and future data binding.
@@ -32,6 +34,7 @@ public class Document implements Serializable {
         this.currentPath = currentPath;
         this.uploadTime = LocalDateTime.now();
         this.lastModifiedTime = this.uploadTime;
+        this.revision = 1L;
     }
 
     public String getDocumentId() {
@@ -96,5 +99,21 @@ public class Document implements Serializable {
 
     public void setEditingStartTime(LocalDateTime editingStartTime) {
         this.editingStartTime = editingStartTime;
+    }
+
+    public long getRevision() {
+        return revision;
+    }
+
+    public void setRevision(long revision) {
+        this.revision = revision;
+    }
+
+    public int getActiveLockCount() {
+        return activeLockCount;
+    }
+
+    public void setActiveLockCount(int activeLockCount) {
+        this.activeLockCount = activeLockCount;
     }
 }

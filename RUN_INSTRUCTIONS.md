@@ -1,63 +1,73 @@
-# 共享文档管理与版本控制系统 - 运行说明
+# 共享文档系统运行说明
 
-## 1. 账号信息说明
+## 1. 账号说明
 
-系统当前使用内存数据来模拟用户账号，服务重启后会重置状态。账号信息硬编码在 `src/main/java/com/sharedoc/service/UserService.java` 文件中。
+系统当前使用内存用户数据，服务重启后会重置。
 
-**默认可用测试账号**：
-- 用户名：`admin`，密码：`123456` （管理员）
-- 用户名：`user`，密码：`123456` （普通用户）
+默认可用账号：
 
-> **注意**：如果在前端登录时遇到问题，请确保使用上述账号和密码组合，并且保证后端服务（8082端口的HTTP API）正在运行。
+- `admin / 123456`
+- `user / 123456`
 
----
+账号定义位置：
 
-## 2. 后端启动说明
+- `src/main/java/com/sharedoc/service/UserService.java`
 
-后端项目基于 Java 17 和 Maven 构建。启动后端服务不仅会开启原有的 Socket 服务（8889端口），还会同时开启为 Web 前端提供的 HTTP API 服务（8082端口）。
+## 2. 启动后端
 
-### 启动步骤
+项目基于 Java 17 和 Maven。
 
-1. 编译项目：
-   ```bash
-   mvn clean compile
-   ```
+编译：
 
-2. 运行服务端：
-   ```bash
-   mvn exec:java -Dexec.mainClass="com.sharedoc.server.ServerMain"
-   ```
+```bash
+mvn clean compile
+```
 
----
+启动：
 
-## 3. 前端启动说明
+```bash
+mvn exec:java -Dexec.mainClass="com.sharedoc.server.ServerMain"
+```
 
-前端采用了轻量级的 HTML + Vue3(CDN) + TailwindCSS(CDN) 方案，所有的代码都在 `frontend` 目录下的 `index.html` 和 `app.js` 中。
+后端启动后会提供：
 
-你只需要一个简单的静态文件服务器来提供前端页面的访问。
+- HTTP API: `http://localhost:8082`
 
-### 启动步骤
+## 3. 启动前端
 
-1. 打开一个**新终端**，进入前端目录：
-   ```bash
-   cd frontend
-   ```
+前端代码位于 `frontend/`，是静态 HTML 页面。
 
-2. 使用 Python 启动一个简单的 HTTP 服务器（Ubuntu / Mac 默认自带 Python3）：
-   ```bash
-   python3 -m http.server 8003
-   ```
+进入目录：
 
-### 访问系统
+```bash
+cd frontend
+```
 
-在浏览器中打开：[http://localhost:8003/](http://localhost:8003/) 即可看到系统登录界面。使用前文提到的账号即可登录使用。
+启动静态服务，例如：
 
----
+```bash
+python -m http.server 8003
+```
 
-## 4. 常见问题 (FAQ)
+浏览器访问：
 
-**Q: 为什么上传/保存失败？**
-A: 后端文件默认存储在项目根目录的 `data/documents/` 文件夹下。如果运行报错，通常是因为权限问题或者文件夹不存在。请确保 Java 进程对该目录有读写权限。
+```text
+http://localhost:8003/
+```
 
-**Q: 点击登出后，为什么别人依然无法编辑该文档？**
-A: 我们已经在 `UserService.logout` 中加入了释放锁的逻辑 `documentService.releaseAllEditsByUser(username)`，正常登出会自动释放锁。如果是直接关闭浏览器，目前后端还没有实现 Socket 级别或 Session 级别的超时检测机制，这是在“后续开发计划”中的一环。
+前端默认请求后端地址：
+
+```text
+http://localhost:8082/api/v1
+```
+
+## 4. 常见问题
+
+**Q: 上传或保存失败怎么办？**  
+A: 后端会把文件写入 `data/documents/` 和 `data/versions/`。请确认 Java 进程对项目目录有读写权限。
+
+**Q: 登出后别人为什么还不能编辑？**  
+A: 正常点击前端登出时，`UserService.logout` 会自动释放当前用户持有的编辑锁。如果是浏览器异常关闭，当前项目还没有实现更完整的会话超时或断线回收机制。
+
+**Q: 为什么重启服务后文档列表或登录状态变化了？**  
+A: 用户在线状态、编辑锁和内存中的业务状态不会持久化。文档文件和版本文件仍保留在 `data/` 目录下。

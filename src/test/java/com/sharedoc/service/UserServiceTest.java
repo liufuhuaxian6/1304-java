@@ -1,18 +1,16 @@
 package com.sharedoc.service;
 
 import com.sharedoc.model.Document;
-import com.sharedoc.model.Request;
-import com.sharedoc.model.RequestType;
 import com.sharedoc.model.Response;
 import com.sharedoc.testutil.TestStateHelper;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
-import java.util.HashMap;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -39,18 +37,18 @@ class UserServiceTest {
 
         assertTrue(success.isSuccess());
         assertEquals("登录成功", success.getMessage());
-        assertTrue(!wrongPassword.isSuccess());
+        assertFalse(wrongPassword.isSuccess());
         assertEquals("密码错误", wrongPassword.getMessage());
     }
 
     @Test
-    void logoutReleasesHeldEditLocks() {
+    void logoutReleasesHeldRangeLocks() {
         Document document = uploadDocument("admin", "logout-release.md", "v1");
-        Response lockResponse = documentService.requestEdit(document.getDocumentId(), "admin");
+        Response lockResponse = documentService.requestEdit(document.getDocumentId(), "admin", 1L, 0, 1);
         assertTrue(lockResponse.isSuccess());
 
         Response logoutResponse = userService.logout("admin");
-        Response otherUserLockResponse = documentService.requestEdit(document.getDocumentId(), "user");
+        Response otherUserLockResponse = documentService.requestEdit(document.getDocumentId(), "user", 1L, 0, 1);
 
         assertTrue(logoutResponse.isSuccess());
         assertEquals("登出成功，已释放 1 个文档的编辑锁", logoutResponse.getMessage());
@@ -67,20 +65,16 @@ class UserServiceTest {
         assertTrue(login.isSuccess());
 
         Response duplicate = userService.register("tester-reg", "other", "USER");
-        assertTrue(!duplicate.isSuccess());
+        assertFalse(duplicate.isSuccess());
         assertEquals("用户名已存在", duplicate.getMessage());
 
         Response blankPassword = userService.register("tester-reg-2", "  ", "USER");
-        assertTrue(!blankPassword.isSuccess());
+        assertFalse(blankPassword.isSuccess());
         assertEquals("密码不能为空", blankPassword.getMessage());
     }
 
     private Document uploadDocument(String username, String fileName, String content) {
-        Map<String, Object> payload = new HashMap<>();
-        payload.put("fileName", fileName);
-        payload.put("fileContent", content.getBytes());
-        Response uploadResponse = documentService.uploadDocument(
-                new Request(RequestType.UPLOAD_DOCUMENT, username, null, payload));
+        Response uploadResponse = documentService.uploadDocument(username, fileName, content.getBytes());
 
         @SuppressWarnings("unchecked")
         Map<String, Object> data = assertInstanceOf(Map.class, uploadResponse.getData());

@@ -5,12 +5,14 @@ import com.sharedoc.server.ServerConfig;
 import com.sharedoc.service.DocumentService;
 import com.sharedoc.service.LockService;
 import com.sharedoc.service.UserService;
+import com.sharedoc.service.VersionService;
 import com.sharedoc.util.IdGenerator;
 
 import java.io.IOException;
 import java.lang.reflect.Field;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.Comparator;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicLong;
 
@@ -22,30 +24,18 @@ public final class TestStateHelper {
     }
 
     public static void resetState() {
-        deleteTrackedDocumentFiles();
+        deleteDataDirectories();
         clearStaticMap(DocumentService.class, "DOCUMENTS");
+        clearStaticMap(DocumentService.class, "DOCUMENT_MONITORS");
         clearStaticMap(LockService.class, "DOCUMENT_LOCKS");
+        clearStaticMap(LockService.class, "DOCUMENT_LOCK_QUEUES");
         clearStaticMap(UserService.class, "ONLINE_USERS");
+        clearStaticMap(VersionService.class, "VERSION_MAP");
         resetSequence("USER_SEQUENCE");
         resetSequence("DOCUMENT_SEQUENCE");
         resetSequence("VERSION_SEQUENCE");
+        resetSequence("LOCK_SEQUENCE");
         createDataDirectories();
-    }
-
-    @SuppressWarnings("unchecked")
-    private static void deleteTrackedDocumentFiles() {
-        try {
-            Field documentsField = DocumentService.class.getDeclaredField("DOCUMENTS");
-            documentsField.setAccessible(true);
-            Map<String, Document> documents = (Map<String, Document>) documentsField.get(null);
-            for (Document document : documents.values()) {
-                if (document != null && document.getCurrentPath() != null) {
-                    Files.deleteIfExists(Path.of(document.getCurrentPath()));
-                }
-            }
-        } catch (NoSuchFieldException | IllegalAccessException | IOException e) {
-            throw new IllegalStateException("Failed to delete tracked document files for tests.", e);
-        }
     }
 
     @SuppressWarnings("unchecked")
@@ -71,12 +61,44 @@ public final class TestStateHelper {
         }
     }
 
+    private static void deleteDataDirectories() {
+        deleteDirectory(Path.of(ServerConfig.DOCUMENT_STORAGE_PATH));
+        deleteDirectory(Path.of(ServerConfig.VERSION_STORAGE_PATH));
+    }
+
+    private static void deleteDirectory(Path path) {
+        if (!Files.exists(path)) {
+            return;
+        }
+
+        try (var walk = Files.walk(path)) {
+            walk.sorted(Comparator.reverseOrder())
+                    .forEach(file -> {
+                        try {
+                            Files.deleteIfExists(file);
+                        } catch (IOException e) {
+                            throw new IllegalStateException("Failed to delete test file: " + file, e);
+                        }
+                    });
+        } catch (IOException e) {
+            throw new IllegalStateException("Failed to clean test directory: " + path, e);
+        }
+    }
+
     private static void createDataDirectories() {
         try {
             Files.createDirectories(Path.of(ServerConfig.DOCUMENT_STORAGE_PATH));
             Files.createDirectories(Path.of(ServerConfig.VERSION_STORAGE_PATH));
+            ensureGitkeep(Path.of(ServerConfig.DOCUMENT_STORAGE_PATH, ".gitkeep"));
+            ensureGitkeep(Path.of(ServerConfig.VERSION_STORAGE_PATH, ".gitkeep"));
         } catch (IOException e) {
             throw new IllegalStateException("Failed to recreate data directories for tests.", e);
+        }
+    }
+
+    private static void ensureGitkeep(Path path) throws IOException {
+        if (!Files.exists(path)) {
+            Files.createFile(path);
         }
     }
 }

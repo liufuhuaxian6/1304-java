@@ -11,6 +11,7 @@ public final class IdGenerator {
     private static final AtomicLong USER_SEQUENCE = new AtomicLong(1);
     private static final AtomicLong DOCUMENT_SEQUENCE = new AtomicLong(1);
     private static final AtomicLong VERSION_SEQUENCE = new AtomicLong(1);
+    private static final AtomicLong LOCK_SEQUENCE = new AtomicLong(1);
 
     private IdGenerator() {
         // TODO: Replace with persistent ID strategy if file metadata persistence is added.
@@ -29,6 +30,10 @@ public final class IdGenerator {
     public static String nextVersionId() {
         // TODO: Consider per-document version numbers in addition to global IDs.
         return "V-" + VERSION_SEQUENCE.getAndIncrement();
+    }
+
+    public static String nextLockId() {
+        return "L-" + LOCK_SEQUENCE.getAndIncrement();
     }
 
     public static String randomId() {
