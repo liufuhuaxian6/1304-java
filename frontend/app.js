@@ -274,6 +274,9 @@ createApp({
         const versions = ref([]);
         const versionDoc = ref(null);
         const isLoadingVersions = ref(false);
+        const selectedVersion = ref(null);
+        const versionDiff = ref(null);
+        const isLoadingVersionDiff = ref(false);
 
         const detectedLanguage = computed(() => detectLanguage(currentDocument.value?.fileName || ''));
         const isCodeFile = computed(() => Boolean(detectedLanguage.value && detectedLanguage.value !== 'plaintext'));
@@ -439,6 +442,13 @@ createApp({
                 revision.value = payload.revisionAfter;
                 activeLocks.value = payload.activeLocks || [];
                 syncCurrentLockFromActive();
+            });
+
+            source.addEventListener('document-rolled-back', async (event) => {
+                const payload = JSON.parse(event.data);
+                await reloadCurrentDocument(true);
+                await fetchDocuments(true);
+                showToast(`${payload.editor || '其他用户'} 已回滚文档到版本 ${payload.versionId}`);
             });
 
             source.onerror = async () => {
@@ -1076,6 +1086,14 @@ createApp({
             VIEW: '查看'
         }[op] || op || '');
 
+        const dedupeVersionComment = (comment) => {
+            if (!comment) {
+                return '';
+            }
+            const parts = String(comment).split(/[；;]/).map((part) => part.trim()).filter(Boolean);
+            return [...new Set(parts)].join('；');
+        };
+
         const openVersions = async (doc) => {
             const docId = getDocumentId(doc);
             if (!docId) {
@@ -1084,11 +1102,16 @@ createApp({
             }
             versionDoc.value = { documentId: docId, fileName: doc.fileName };
             versions.value = [];
+            selectedVersion.value = null;
+            versionDiff.value = null;
             showVersions.value = true;
             isLoadingVersions.value = true;
             try {
                 const data = await apiCall(`/documents/${docId}/versions`);
-                versions.value = data || [];
+                versions.value = (data || []).map((version) => ({
+                    ...version,
+                    comment: dedupeVersionComment(version.comment)
+                }));
             } catch (err) {
                 showToast(err.message || '历史版本获取失败');
             } finally {
@@ -1100,6 +1123,31 @@ createApp({
             showVersions.value = false;
             versionDoc.value = null;
             versions.value = [];
+            selectedVersion.value = null;
+            versionDiff.value = null;
+        };
+
+        const changeTypeLabel = (type) => ({
+            ADD: '新增',
+            DELETE: '删除',
+            REPLACE: '替换'
+        }[type] || type || '修改');
+
+        const selectVersion = async (v) => {
+            const docId = getDocumentId(versionDoc.value);
+            if (!docId || !v?.versionId) {
+                return;
+            }
+            selectedVersion.value = v;
+            versionDiff.value = null;
+            isLoadingVersionDiff.value = true;
+            try {
+                versionDiff.value = await apiCall(`/documents/${docId}/versions/${v.versionId}/diff`);
+            } catch (err) {
+                showToast(err.message || '版本差异获取失败');
+            } finally {
+                isLoadingVersionDiff.value = false;
+            }
         };
 
         const downloadVersion = async (v) => {
@@ -1135,6 +1183,8 @@ createApp({
                 showToast('版本回滚成功');
                 const data = await apiCall(`/documents/${docId}/versions`);
                 versions.value = data || [];
+                selectedVersion.value = null;
+                versionDiff.value = null;
                 if (currentView.value === 'editor' && currentDocument.value && getDocumentId(currentDocument.value) === docId) {
                     await viewDocument({ documentId: docId, fileName });
                 }
@@ -1172,6 +1222,9 @@ createApp({
             versions,
             versionDoc,
             isLoadingVersions,
+            selectedVersion,
+            versionDiff,
+            isLoadingVersionDiff,
             revision,
             isCodeFile,
             languageLabel,
@@ -1189,6 +1242,8 @@ createApp({
             opLabel,
             openVersions,
             closeVersions,
+            selectVersion,
+            changeTypeLabel,
             downloadVersion,
             rollbackVersion,
             handleAutoBeforeInput,

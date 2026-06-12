@@ -33,7 +33,6 @@ public final class TestStateHelper {
         clearStaticMap(VersionService.class, "VERSION_MAP");
         resetSequence("USER_SEQUENCE");
         resetSequence("DOCUMENT_SEQUENCE");
-        resetSequence("VERSION_SEQUENCE");
         resetSequence("LOCK_SEQUENCE");
         createDataDirectories();
     }

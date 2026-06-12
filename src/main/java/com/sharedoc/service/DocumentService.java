@@ -240,6 +240,7 @@ public class DocumentService {
                 }
 
                 long revisionBefore = document.getRevision();
+                String originalText = content.substring(start, end);
                 int delta = replacementText.length() - (end - start);
                 String newContent = content.substring(0, start) + replacementText + content.substring(end);
                 fileStorage.saveFile(document.getCurrentPath(), newContent.getBytes(StandardCharsets.UTF_8));
@@ -248,7 +249,12 @@ public class DocumentService {
                         documentId,
                         document.getFileName(),
                         username,
-                        document.getCurrentPath(),
+                        start,
+                        end,
+                        originalText,
+                        replacementText,
+                        revisionBefore,
+                        revisionBefore + 1,
                         comment
                 );
                 if (!versionResponse.isSuccess()) {

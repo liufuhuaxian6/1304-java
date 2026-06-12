@@ -2,6 +2,7 @@ package com.sharedoc.service;
 
 import com.sharedoc.model.ContentUpdateResult;
 import com.sharedoc.model.Document;
+import com.sharedoc.model.DocumentVersion;
 import com.sharedoc.model.RangeLock;
 import com.sharedoc.model.Response;
 import com.sharedoc.storage.FileStorage;
@@ -11,6 +12,8 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CountDownLatch;
@@ -121,6 +124,71 @@ class DocumentServiceTest {
         assertEquals(11, update.getEnd());
         assertEquals("sharedoc", update.getReplacementText());
         assertTrue(documentService.getActiveLocks(document.getDocumentId()).isEmpty());
+    }
+
+    @Test
+    void rapidEditsAreMergedIntoOnePatchVersion() throws Exception {
+        Document document = uploadDocument("admin", "patch-merge.md", "abcdef");
+        Response firstLock = documentService.requestEdit(document.getDocumentId(), "admin", 1L, 0, 1);
+        assertTrue(firstLock.isSuccess());
+        Response firstSave = documentService.saveRange("admin", document.getDocumentId(), lockId(firstLock), 1L, "A", "same comment");
+        assertTrue(firstSave.isSuccess());
+
+        Response secondLock = documentService.requestEdit(document.getDocumentId(), "admin", 2L, 5, 6);
+        assertTrue(secondLock.isSuccess());
+        Response secondSave = documentService.saveRange("admin", document.getDocumentId(), lockId(secondLock), 2L, "F", "same comment");
+        assertTrue(secondSave.isSuccess());
+
+        VersionService versionService = new VersionService();
+        Response versionsResponse = versionService.listVersions(document.getDocumentId());
+        List<?> versions = assertInstanceOf(List.class, versionsResponse.getData());
+        assertEquals(2, versions.size());
+
+        DocumentVersion editVersion = assertInstanceOf(DocumentVersion.class, versions.get(1));
+        assertEquals("PATCH", editVersion.getStorageType());
+        assertEquals(2, editVersion.getPatchCount());
+        assertEquals("same comment", editVersion.getComment());
+
+        String storedPatch = Files.readString(Path.of(editVersion.getVersionPath()), StandardCharsets.UTF_8);
+        assertTrue(storedPatch.contains("\"replacementText\":\"A\""));
+        assertTrue(storedPatch.contains("\"replacementText\":\"F\""));
+        assertFalse(storedPatch.equals("AbcdeF"));
+
+        Response downloadVersionResponse = versionService.downloadVersion(document.getDocumentId(), editVersion.getVersionId());
+        Map<String, Object> downloadData = responseData(downloadVersionResponse);
+        assertEquals("AbcdeF", new String(assertInstanceOf(byte[].class, downloadData.get("fileContent")), StandardCharsets.UTF_8));
+
+        Response diffResponse = versionService.diffWithPreviousVersion(document.getDocumentId(), editVersion.getVersionId());
+        Map<String, Object> diffData = responseData(diffResponse);
+        List<?> changes = assertInstanceOf(List.class, diffData.get("changes"));
+        assertEquals(2, changes.size());
+        Map<?, ?> firstChange = assertInstanceOf(Map.class, changes.get(0));
+        Map<?, ?> secondChange = assertInstanceOf(Map.class, changes.get(1));
+        assertEquals("REPLACE", firstChange.get("type"));
+        assertEquals("a", firstChange.get("removedText"));
+        assertEquals("A", firstChange.get("addedText"));
+        assertEquals("REPLACE", secondChange.get("type"));
+        assertEquals("f", secondChange.get("removedText"));
+        assertEquals("F", secondChange.get("addedText"));
+    }
+
+    @Test
+    void versionNumbersAreScopedPerDocument() {
+        Document firstDocument = uploadDocument("admin", "first.md", "first");
+        Document secondDocument = uploadDocument("admin", "second.md", "second");
+
+        VersionService versionService = new VersionService();
+        List<?> firstVersions = assertInstanceOf(List.class, versionService.listVersions(firstDocument.getDocumentId()).getData());
+        List<?> secondVersions = assertInstanceOf(List.class, versionService.listVersions(secondDocument.getDocumentId()).getData());
+
+        DocumentVersion firstInitialVersion = assertInstanceOf(DocumentVersion.class, firstVersions.get(0));
+        DocumentVersion secondInitialVersion = assertInstanceOf(DocumentVersion.class, secondVersions.get(0));
+        assertEquals("V-1", firstInitialVersion.getVersionId());
+        assertEquals("V-1", secondInitialVersion.getVersionId());
+
+        Response downloadSecondVersion = versionService.downloadVersion(secondDocument.getDocumentId(), "V-1");
+        Map<String, Object> downloadData = responseData(downloadSecondVersion);
+        assertEquals("second", new String(assertInstanceOf(byte[].class, downloadData.get("fileContent")), StandardCharsets.UTF_8));
     }
 
     @Test

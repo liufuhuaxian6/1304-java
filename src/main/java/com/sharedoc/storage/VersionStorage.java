@@ -2,6 +2,7 @@ package com.sharedoc.storage;
 
 import com.sharedoc.server.ServerConfig;
 
+import java.nio.charset.StandardCharsets;
 import java.nio.file.InvalidPathException;
 import java.nio.file.Path;
 
@@ -24,6 +25,24 @@ public class VersionStorage {
 
     public String buildVersionFilePath(String documentId, String versionId, String fileName) {
         return Path.of(ServerConfig.VERSION_STORAGE_PATH, documentId, versionId + "-" + sanitizeFileName(fileName)).toString();
+    }
+
+    public String savePatchFile(String documentId, String versionId, String fileName, String patchContent) {
+        String versionPath = buildPatchFilePath(documentId, versionId, fileName);
+        fileStorage.saveFile(versionPath, patchContent.getBytes(StandardCharsets.UTF_8));
+        return versionPath;
+    }
+
+    public void overwriteVersionText(String versionPath, String content) {
+        fileStorage.saveFile(versionPath, content.getBytes(StandardCharsets.UTF_8));
+    }
+
+    public String readVersionText(String versionPath) {
+        return new String(readVersionFile(versionPath), StandardCharsets.UTF_8);
+    }
+
+    public String buildPatchFilePath(String documentId, String versionId, String fileName) {
+        return Path.of(ServerConfig.VERSION_STORAGE_PATH, documentId, versionId + "-" + sanitizeFileName(fileName) + ".patch.json").toString();
     }
 
     public void restoreVersionFile(String versionPath, String targetPath) {

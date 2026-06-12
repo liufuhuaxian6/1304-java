@@ -15,9 +15,11 @@
 
 - 登录 / 登出 / 注册
 - 文档列表、上传、下载、在线预览
-- 编辑锁控制，同一时刻只允许一名用户编辑同一文档
-- 文档保存与版本生成
-- 历史版本列表、下载、回滚
+- 细粒度区间锁控制，不同用户可并行编辑同一文档的不重叠区间
+- 局部内容保存与 SSE 实时同步
+- 增量版本存储：初始版本保存完整快照，编辑版本只保存修改片段
+- 单位时间内同一用户的连续编辑会合并为一个 PATCH 版本以节省空间
+- 历史版本列表、下载、差异查看、回滚；回滚后其他在线用户会同步刷新文档
 
 ## 技术栈
 
@@ -116,12 +118,22 @@ http://localhost:8082/api/v1
 - `GET /api/v1/documents/{id}/download`
 - `POST /api/v1/documents/{id}/lock`
 - `DELETE /api/v1/documents/{id}/lock`
-- `PUT /api/v1/documents/{id}/content`
+- `PATCH /api/v1/documents/{id}/content`
+- `GET /api/v1/documents/{id}/events`
 - `GET /api/v1/documents/{id}/versions`
+- `GET /api/v1/documents/{id}/versions/{versionId}/diff`
 - `GET /api/v1/documents/{id}/versions/{versionId}/download`
 - `POST /api/v1/documents/{id}/versions/{versionId}/rollback`
 
 接口说明见 [frontend-api-design.md](./frontend-api-design.md)。
+
+## 编辑与版本说明
+
+- 前端根据光标或选区申请行级扩展后的区间锁，锁响应包含 `lockId`、`start`、`end`、`revision`、`queued`、`queuePosition` 和当前活动锁列表。
+- 保存使用 `PATCH /content`，请求只提交当前锁区间的新文本，服务端按锁的最新区间写回并释放锁。
+- 文档事件通过 `GET /events` 的 SSE 推送，包括锁申请/释放、内容局部更新、队列晋升和版本回滚。
+- `data/versions/` 中上传和回滚版本保存为完整文件；普通编辑版本保存为 `*.patch.json`，其中记录 `start/end`、原文本、新文本和修订号。
+- 历史版本弹窗点击版本行会请求 `/versions/{versionId}/diff`，显示该版本相对上一版本的新增、删除或替换内容。
 
 ## 测试
 

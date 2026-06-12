@@ -38,6 +38,3 @@ data/
 .idea/
 *.iml
 .vscode/
-
-# data
-data/

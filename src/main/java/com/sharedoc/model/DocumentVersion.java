@@ -20,6 +20,8 @@ public class DocumentVersion implements Serializable {
     private OperationType operationType;
     private String versionPath;
     private String comment;
+    private String storageType;
+    private int patchCount;
 
     public DocumentVersion() {
         // TODO: Keep default constructor for serialization and future data binding.
@@ -35,6 +37,8 @@ public class DocumentVersion implements Serializable {
         this.operationType = operationType;
         this.versionPath = versionPath;
         this.comment = comment;
+        this.storageType = "FULL";
+        this.patchCount = 0;
     }
 
     public String getVersionId() {
@@ -99,5 +103,21 @@ public class DocumentVersion implements Serializable {
 
     public void setComment(String comment) {
         this.comment = comment;
+    }
+
+    public String getStorageType() {
+        return storageType;
+    }
+
+    public void setStorageType(String storageType) {
+        this.storageType = storageType;
+    }
+
+    public int getPatchCount() {
+        return patchCount;
+    }
+
+    public void setPatchCount(int patchCount) {
+        this.patchCount = patchCount;
     }
 }

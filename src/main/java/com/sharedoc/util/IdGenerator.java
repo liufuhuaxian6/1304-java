@@ -10,7 +10,6 @@ import java.util.concurrent.atomic.AtomicLong;
 public final class IdGenerator {
     private static final AtomicLong USER_SEQUENCE = new AtomicLong(1);
     private static final AtomicLong DOCUMENT_SEQUENCE = new AtomicLong(1);
-    private static final AtomicLong VERSION_SEQUENCE = new AtomicLong(1);
     private static final AtomicLong LOCK_SEQUENCE = new AtomicLong(1);
 
     private IdGenerator() {
@@ -25,11 +24,6 @@ public final class IdGenerator {
     public static String nextDocumentId() {
         // TODO: Consider UUID or persisted sequence for production-like implementation.
         return "D-" + DOCUMENT_SEQUENCE.getAndIncrement();
-    }
-
-    public static String nextVersionId() {
-        // TODO: Consider per-document version numbers in addition to global IDs.
-        return "V-" + VERSION_SEQUENCE.getAndIncrement();
     }
 
     public static String nextLockId() {

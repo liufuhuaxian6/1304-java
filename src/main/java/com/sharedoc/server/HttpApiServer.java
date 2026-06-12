@@ -379,14 +379,17 @@ public class HttpApiServer {
                 item.put("operationType", v.getOperationType() == null ? null : v.getOperationType().name());
                 item.put("editTime", DateTimeUtil.format(v.getEditTime()));
                 item.put("comment", v.getComment());
+                item.put("storageType", v.getStorageType());
+                item.put("patchCount", v.getPatchCount());
                 data.add(item);
             }
             ctx.json(success("版本列表获取成功", data));
         });
 
         app.get("/api/v1/documents/{documentId}/versions/{versionId}/download", ctx -> {
+            String docId = ctx.pathParam("documentId");
             String versionId = ctx.pathParam("versionId");
-            Response res = versionService.downloadVersion(versionId);
+            Response res = versionService.downloadVersion(docId, versionId);
             if (!res.isSuccess()) {
                 ctx.status(404).json(error("VERSION_NOT_FOUND", res.getMessage()));
                 return;
@@ -402,6 +405,17 @@ public class HttpApiServer {
             ctx.result(content);
         });
 
+        app.get("/api/v1/documents/{documentId}/versions/{versionId}/diff", ctx -> {
+            String docId = ctx.pathParam("documentId");
+            String versionId = ctx.pathParam("versionId");
+            Response res = versionService.diffWithPreviousVersion(docId, versionId);
+            if (!res.isSuccess()) {
+                ctx.status(404).json(error("VERSION_DIFF_NOT_FOUND", res.getMessage()));
+                return;
+            }
+            ctx.json(success("版本差异获取成功", res.getData()));
+        });
+
         app.post("/api/v1/documents/{documentId}/versions/{versionId}/rollback", ctx -> {
             String docId = ctx.pathParam("documentId");
             String versionId = ctx.pathParam("versionId");
@@ -415,6 +429,16 @@ public class HttpApiServer {
                 return;
             }
             ctx.json(success("版本回滚成功", res.getData()));
+
+            @SuppressWarnings("unchecked")
+            Map<String, Object> data = (Map<String, Object>) res.getData();
+            Document document = (Document) data.get("document");
+            Map<String, Object> event = new HashMap<>();
+            event.put("document", document);
+            event.put("versionId", versionId);
+            event.put("editor", username);
+            event.put("revision", document.getRevision());
+            eventBroker.broadcast(docId, "document-rolled-back", event);
         });
 
         app.sse("/api/v1/documents/{documentId}/events", client -> {
