@@ -20,6 +20,7 @@ import io.javalin.http.Context;
 import io.javalin.http.HandlerType;
 import io.javalin.http.UnauthorizedResponse;
 import io.javalin.http.UploadedFile;
+import io.javalin.http.staticfiles.Location;
 import io.javalin.json.JavalinJackson;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -28,6 +29,8 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
@@ -85,6 +88,7 @@ public class HttpApiServer {
                 .registerModule(new JavaTimeModule())
                 .disable(SerializationFeature.WRITE_DATES_AS_TIMESTAMPS);
 
+        boolean serveFrontend = Files.isDirectory(Path.of(ServerConfig.FRONTEND_DIR));
         app = Javalin.create(config -> {
             config.jsonMapper(new JavalinJackson(jacksonMapper));
             config.http.maxRequestSize = ServerConfig.MAX_UPLOAD_BYTES + 1_048_576L;
@@ -96,6 +100,16 @@ public class HttpApiServer {
                     it.allowHost(origins.get(0), origins.subList(1, origins.size()).toArray(new String[0]));
                 }
             }));
+            if (serveFrontend) {
+                // Host the static frontend from the same origin as the API so
+                // opening http://<host>:<port>/ needs no separate web server
+                // and triggers no CORS at all.
+                config.staticFiles.add(staticFiles -> {
+                    staticFiles.hostedPath = "/";
+                    staticFiles.directory = ServerConfig.FRONTEND_DIR;
+                    staticFiles.location = Location.EXTERNAL;
+                });
+            }
         });
 
         registerRoutes(app);
@@ -107,6 +121,9 @@ public class HttpApiServer {
         });
         app.start(port);
         LOGGER.info("HTTP API Server started on port {}", port);
+        if (serveFrontend) {
+            LOGGER.info("Frontend hosted at http://localhost:{}/ (dir: {})", port, ServerConfig.FRONTEND_DIR);
+        }
     }
 
     public synchronized void stop() {

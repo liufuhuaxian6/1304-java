@@ -2,16 +2,13 @@
 
 ## 1. 账号说明
 
-系统当前使用内存用户数据，服务重启后会重置。
-
 默认可用账号：
 
 - `admin / 123456`（ADMIN 角色，可回滚任意文档）
 - `user / 123456`（USER 角色）
 
-账号定义位置：
-
-- `src/main/java/com/sharedoc/service/UserService.java`（密码以 PBKDF2 哈希存储）
+首次启动时若 `data/metadata/users.json` 不存在，会自动创建上述两个账号（密码以 PBKDF2 哈希存储）；
+此后账号从该文件加载，新注册用户会一并持久化，**重启不丢失**。
 
 新账号可以通过登录页的"立即注册"入口创建，注册账号的角色固定为 USER。
 
@@ -34,43 +31,37 @@ mvn exec:java -Dexec.mainClass="com.sharedoc.server.ServerMain"
 后端启动后会提供：
 
 - HTTP API: `http://localhost:8082`
+- 前端页面: `http://localhost:8082/`（后端直接托管 `frontend/` 目录）
 
-## 3. 启动前端
+## 3. 打开前端
 
-前端代码位于 `frontend/`，是静态 HTML 页面。
+### 方式一（推荐）：后端托管
 
-进入目录：
+后端已经在同一端口托管前端，直接浏览器打开即可，无需单独启动静态服务器，也不涉及跨域：
+
+```text
+http://localhost:8082/
+```
+
+### 方式二（可选）：独立静态服务器
+
+如果想单独跑前端，进入目录并启动静态服务：
 
 ```bash
 cd frontend
-```
-
-启动静态服务，例如：
-
-```bash
 python -m http.server 8003
 ```
 
-浏览器访问：
+浏览器访问 `http://localhost:8003/`，前端默认请求后端地址 `http://localhost:8082/api/v1`。
 
-```text
-http://localhost:8003/
-```
-
-前端默认请求后端地址：
-
-```text
-http://localhost:8082/api/v1
-```
-
-注意：后端 CORS 默认只允许 `http://localhost:8003` 和 `http://127.0.0.1:8003`。
+此模式为跨域访问：后端 CORS 默认只允许 `http://localhost:8003` 和 `http://127.0.0.1:8003`。
 如果前端跑在其他端口，请设置环境变量 `SHAREDOC_CORS_ORIGINS`（逗号分隔，`*` 表示全部放开，仅限开发）。
 端口、存储目录、会话/锁过期时间、上传大小限制等配置项见 README 的「配置」一节。
 
 ## 4. 常见问题
 
 **Q: 上传或保存失败怎么办？**  
-A: 后端会把当前文件写入 `data/documents/`，把历史版本写入 `data/versions/`。请确认 Java 进程对项目目录有读写权限。
+A: 后端会把当前文件写入 `data/documents/`，历史版本写入 `data/versions/`，元数据写入 `data/metadata/`。请确认 Java 进程对项目目录有读写权限。
 
 **Q: `data/versions/` 里为什么有 `.patch.json` 文件？**  
 A: 初始上传和回滚版本会保存完整文件；普通编辑版本只保存本次修改片段。短时间内同一用户的多次保存会合并到同一个 `*.patch.json` 中，通过 `patchCount` 记录片段数量，用来减少版本存储空间。
@@ -87,5 +78,8 @@ A: 回滚要求当前文档没有活动或排队区间锁。回滚成功后服�
 **Q: 历史版本弹窗能看到哪些改动？**  
 A: 点击历史版本表格行后，前端会请求 `/versions/{versionId}/diff`，展示该版本相对上一个版本的新增、删除或替换内容。合并后的 PATCH 版本会展示其中每个修改片段。
 
-**Q: 为什么重启服务后文档列表或登录状态变化了？**  
-A: 用户在线状态、编辑锁和内存中的业务状态不会持久化。文档文件和版本文件仍保留在 `data/` 目录下。
+**Q: 重启服务后数据还在吗？**  
+A: 文档、历史版本和用户账号都会持久化到 `data/` 目录（元数据在 `data/metadata/` 下的 `documents.json` / `versions.json` / `users.json`），重启后自动恢复。只有登录会话、在线状态和编辑锁是内存态，重启后需要重新登录、锁也会清空——这是按设计如此。
+
+**Q: 想清空所有数据重新开始怎么办？**  
+A: 停止服务后删除整个 `data/` 目录即可，下次启动会重新创建默认账号和空文档列表。

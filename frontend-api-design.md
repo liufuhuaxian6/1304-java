@@ -6,9 +6,12 @@
 
 - 前端入口：`frontend/index.html`
 - 前端脚本：`frontend/app.js`
+- 部署方式：后端默认在 `http://localhost:8082/` 直接托管前端静态页面（同源访问，无跨域）；也可用独立静态服务器跨域访问
 - API Base URL：`http://localhost:8082/api/v1`（可通过 `window.SHAREDOC_API_BASE` 覆盖）
 - 鉴权方式：`Authorization: Bearer <token>`，会话使用滑动过期（默认 30 分钟，可配置）
 - 未认证请求会在 before 拦截阶段被直接拒绝（401 `AUTH_REQUIRED`），不会执行业务处理器
+- CORS 预检（OPTIONS）请求不需要认证，由 CORS 配置直接应答
+- 数据持久化：文档、历史版本、用户账号落盘到 `data/`，服务重启后自动恢复；会话与编辑锁为内存态
 - 实时同步：`GET /documents/{documentId}/events` 使用 SSE，前端也会把 token 作为查询参数传入
 
 统一响应结构：

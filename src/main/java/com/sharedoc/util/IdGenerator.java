@@ -27,4 +27,37 @@ public final class IdGenerator {
     public static String nextLockId() {
         return "L-" + LOCK_SEQUENCE.getAndIncrement();
     }
+
+    /**
+     * Raises the user ID sequence so the next generated ID will not collide
+     * with an ID restored from persisted state.
+     */
+    public static void ensureUserSequenceAtLeast(long value) {
+        USER_SEQUENCE.updateAndGet(current -> Math.max(current, value));
+    }
+
+    /** @see #ensureUserSequenceAtLeast(long) */
+    public static void ensureDocumentSequenceAtLeast(long value) {
+        DOCUMENT_SEQUENCE.updateAndGet(current -> Math.max(current, value));
+    }
+
+    /**
+     * Extracts the trailing numeric component of an ID such as {@code "D-12"}.
+     * Returns 0 for null, malformed, or non-numeric IDs (for example the
+     * seeded {@code "U-ADMIN"}).
+     */
+    public static long numericSuffix(String id) {
+        if (id == null) {
+            return 0;
+        }
+        int dash = id.lastIndexOf('-');
+        if (dash < 0 || dash == id.length() - 1) {
+            return 0;
+        }
+        try {
+            return Long.parseLong(id.substring(dash + 1));
+        } catch (NumberFormatException e) {
+            return 0;
+        }
+    }
 }

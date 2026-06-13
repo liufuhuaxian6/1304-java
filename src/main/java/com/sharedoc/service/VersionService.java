@@ -9,12 +9,15 @@ import com.sharedoc.model.ErrorCodes;
 import com.sharedoc.model.OperationType;
 import com.sharedoc.model.Response;
 import com.sharedoc.model.VersionPatch;
+import com.sharedoc.server.ServerConfig;
+import com.sharedoc.storage.JsonStore;
 import com.sharedoc.storage.VersionStorage;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Path;
 import java.time.Duration;
 import java.time.LocalDateTime;
 import java.util.ArrayList;
@@ -47,6 +50,29 @@ public class VersionService {
     private final Map<String, List<DocumentVersion>> versionMap = new ConcurrentHashMap<>();
     private final Object versionLock = new Object();
     private final VersionStorage versionStorage = new VersionStorage();
+    private final JsonStore versionStore;
+
+    public VersionService() {
+        this(new JsonStore(Path.of(ServerConfig.METADATA_STORAGE_PATH, "versions.json")));
+    }
+
+    public VersionService(JsonStore versionStore) {
+        this.versionStore = versionStore;
+        loadVersions();
+    }
+
+    private void loadVersions() {
+        Map<String, List<DocumentVersion>> stored =
+                versionStore.read(new TypeReference<Map<String, List<DocumentVersion>>>() { });
+        if (stored != null) {
+            versionMap.putAll(stored);
+        }
+    }
+
+    /** Persists the version index. Must be called while holding {@code versionLock}. */
+    private void persist() {
+        versionStore.write(new HashMap<>(versionMap));
+    }
 
     public Response createInitialVersion(String documentId, String fileName, String username, String sourcePath) {
         return createVersion(documentId, fileName, username, sourcePath, OperationType.UPLOAD, "初始上传版本");
@@ -82,6 +108,7 @@ public class VersionService {
                 DocumentVersion version = findMergeTarget(documentId, username, OperationType.EDIT);
                 if (version != null) {
                     appendPatch(version, patch, versionComment);
+                    persist();
                     return new Response(true, "版本记录创建成功", version);
                 }
 
@@ -91,6 +118,7 @@ public class VersionService {
                     version = createPatchVersion(documentId, fileName, username, versionComment, patch);
                 }
                 versionMap.computeIfAbsent(documentId, key -> new ArrayList<>()).add(version);
+                persist();
                 return new Response(true, "版本记录创建成功", version);
             } catch (Exception e) {
                 LOGGER.error("Failed to create edit version, documentId={}", documentId, e);
@@ -242,6 +270,7 @@ public class VersionService {
                 version.setStorageType(STORAGE_FULL);
                 version.setPatchCount(0);
                 versionMap.computeIfAbsent(documentId, key -> new ArrayList<>()).add(version);
+                persist();
                 return new Response(true, "版本记录创建成功", version);
             } catch (Exception e) {
                 LOGGER.error("Failed to create version for document {}", documentId, e);

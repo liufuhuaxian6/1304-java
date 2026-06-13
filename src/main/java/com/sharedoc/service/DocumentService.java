@@ -1,5 +1,6 @@
 package com.sharedoc.service;
 
+import com.fasterxml.jackson.core.type.TypeReference;
 import com.sharedoc.model.ContentUpdateResult;
 import com.sharedoc.model.Document;
 import com.sharedoc.model.DocumentVersion;
@@ -9,6 +10,7 @@ import com.sharedoc.model.RangeLock;
 import com.sharedoc.model.Response;
 import com.sharedoc.server.ServerConfig;
 import com.sharedoc.storage.FileStorage;
+import com.sharedoc.storage.JsonStore;
 import com.sharedoc.util.FileNames;
 import com.sharedoc.util.IdGenerator;
 import org.slf4j.Logger;
@@ -36,15 +38,46 @@ public class DocumentService {
     private final FileStorage fileStorage;
     private final LockService lockService;
     private final VersionService versionService;
+    private final JsonStore documentStore;
 
     public DocumentService() {
         this(new FileStorage(), new LockService(), new VersionService());
     }
 
     public DocumentService(FileStorage fileStorage, LockService lockService, VersionService versionService) {
+        this(fileStorage, lockService, versionService,
+                new JsonStore(Path.of(ServerConfig.METADATA_STORAGE_PATH, "documents.json")));
+    }
+
+    public DocumentService(FileStorage fileStorage, LockService lockService, VersionService versionService,
+                           JsonStore documentStore) {
         this.fileStorage = fileStorage;
         this.lockService = lockService;
         this.versionService = versionService;
+        this.documentStore = documentStore;
+        loadDocuments();
+    }
+
+    private void loadDocuments() {
+        List<Document> stored = documentStore.read(new TypeReference<List<Document>>() { });
+        if (stored == null) {
+            return;
+        }
+        long maxId = 0;
+        for (Document document : stored) {
+            // Locks never survive a restart, so the derived editing state is
+            // reset; it is recomputed from live locks on the next read.
+            document.setEditingUser(null);
+            document.setEditingStartTime(null);
+            document.setActiveLockCount(0);
+            documents.put(document.getDocumentId(), document);
+            maxId = Math.max(maxId, IdGenerator.numericSuffix(document.getDocumentId()));
+        }
+        IdGenerator.ensureDocumentSequenceAtLeast(maxId + 1);
+    }
+
+    private void persistDocuments() {
+        documentStore.write(new ArrayList<>(documents.values()));
     }
 
     public boolean documentExists(String documentId) {
@@ -103,6 +136,7 @@ public class DocumentService {
                 return Response.fail(versionResponse.getCode(), "文档上传失败: " + versionResponse.getMessage());
             }
 
+            persistDocuments();
             Map<String, Object> result = new HashMap<>();
             result.put("document", document);
             result.put("initialVersion", versionResponse.getData());
@@ -295,6 +329,7 @@ public class DocumentService {
 
                 document.setRevision(revisionBefore + 1);
                 document.setLastModifiedTime(LocalDateTime.now());
+                persistDocuments();
 
                 lockService.shiftLocksAfterEdit(documentId, lockId, start, end, delta);
                 LockReleaseResult releaseResult = lockService.releaseLockByOwner(documentId, username);
@@ -373,6 +408,7 @@ public class DocumentService {
             if (rollbackResponse.isSuccess()) {
                 document.setLastModifiedTime(LocalDateTime.now());
                 document.setRevision(document.getRevision() + 1);
+                persistDocuments();
             }
             return rollbackResponse;
         }

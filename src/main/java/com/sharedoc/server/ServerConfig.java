@@ -19,6 +19,12 @@ public final class ServerConfig {
     /** Version storage directory. Override: SHAREDOC_VERSION_DIR */
     public static final String VERSION_STORAGE_PATH = fromEnv("SHAREDOC_VERSION_DIR", "data/versions");
 
+    /** Metadata (users / documents / versions index) directory. Override: SHAREDOC_METADATA_DIR */
+    public static final String METADATA_STORAGE_PATH = fromEnv("SHAREDOC_METADATA_DIR", "data/metadata");
+
+    /** Frontend static files directory served by the backend. Override: SHAREDOC_FRONTEND_DIR */
+    public static final String FRONTEND_DIR = fromEnv("SHAREDOC_FRONTEND_DIR", "frontend");
+
     /** Sliding session expiry. Override: SHAREDOC_SESSION_TTL_MINUTES */
     public static final Duration SESSION_TTL =
             Duration.ofMinutes(intFromEnv("SHAREDOC_SESSION_TTL_MINUTES", 30));

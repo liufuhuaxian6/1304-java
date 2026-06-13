@@ -6,10 +6,10 @@
 
 系统当前只保留 Web 访问方式：
 
-- 后端提供 HTTP REST API + SSE 实时事件
+- 后端提供 HTTP REST API + SSE 实时事件，并直接托管前端静态页面
 - 前端使用 `frontend/index.html` + `frontend/app.js`（Vue 3 CDN）
-- 文档内容和历史版本存储在本地文件系统
-- 用户、会话、在线状态和编辑锁保存在内存中
+- 文档内容、历史版本以及用户/文档/版本元数据持久化到本地文件系统，重启后自动恢复
+- 会话、在线状态和编辑锁保存在内存中（按设计不跨重启保留）
 
 ## 功能总览
 
@@ -17,6 +17,7 @@
 
 - 登录 / 登出 / 注册（前端登录页提供注册入口）
 - 密码以 PBKDF2（HmacSHA256，65536 轮加盐）哈希存储，服务端不保存明文，接口响应中永不包含密码字段
+- 账号持久化到 `users.json`，注册的用户重启后依然可登录
 - 注册账号固定为 `USER` 角色，无法通过注册获得管理员权限
 - 登录失败统一提示"用户名或密码错误"，不暴露用户名是否存在
 - 会话 token 使用滑动过期（默认 30 分钟），过期后自动失效
@@ -45,6 +46,13 @@
 - 历史版本列表、下载、相邻版本差异查看
 - 版本回滚：仅文档所有者或 `ADMIN` 可回滚；存在活动锁时禁止回滚；回滚生成新版本并同步刷新其他在线用户
 
+### 持久化与部署
+
+- 文档元数据、版本索引、用户账号分别持久化到 `data/metadata/` 下的 `documents.json` / `versions.json` / `users.json`
+- 写入采用「临时文件 + 原子重命名」，进程崩溃不会留下半截文件
+- 启动时自动加载，并把 ID 序列恢复到已有最大值之上，避免新建文档/用户与历史 ID 冲突
+- 后端直接托管 `frontend/` 静态页面：浏览器打开 `http://localhost:8082/` 即可使用，无需单独的静态服务器，同源访问也不触发跨域
+
 ### 安全设计
 
 - 认证拦截在 Javalin `before` 处理器中通过抛出 `UnauthorizedResponse` 中断请求管线，未认证请求不会执行任何业务处理器（有专门的回归测试覆盖"401 不泄露响应体"）
@@ -71,17 +79,18 @@
 │   └── app.js              # Vue 3 应用：锁管理、自动保存、SSE 同步、坐标映射
 ├── data
 │   ├── documents           # 当前文档文件（运行时生成）
-│   └── versions            # 历史版本文件（FULL 快照 + *.patch.json）
+│   ├── versions            # 历史版本文件（FULL 快照 + *.patch.json）
+│   └── metadata            # 元数据：documents.json / versions.json / users.json
 ├── src
 │   ├── main/java/com/sharedoc
 │   │   ├── model           # Document / DocumentVersion / RangeLock / Response / ErrorCodes ...
 │   │   ├── server          # HttpApiServer / DocumentEventBroker / ServerConfig / ServerMain
 │   │   ├── service         # DocumentService / LockService / VersionService / UserService
-│   │   ├── storage         # FileStorage / VersionStorage
+│   │   ├── storage         # FileStorage / VersionStorage / JsonStore / StoredUser
 │   │   └── util            # PasswordHasher / FileNames / IdGenerator / DateTimeUtil
 │   └── test/java/com/sharedoc
-│       ├── server          # HTTP 冒烟流程 + 安全回归测试（越权、提权、回滚权限）
-│       ├── service         # 文档 / 锁（含 TTL 过期）/ 版本（含快照策略）/ 用户测试
+│       ├── server          # HTTP 冒烟流程 + 安全回归测试（越权、提权、回滚权限、CORS 预检）
+│       ├── service         # 文档 / 锁（TTL）/ 版本（快照）/ 用户 / 持久化（重启恢复）测试
 │       └── testutil        # 测试状态重置工具
 └── pom.xml
 ```
@@ -91,6 +100,7 @@
 - **服务装配**：所有服务均为实例状态（无静态可变共享状态），由 `ServerMain` 显式装配；`DocumentService` 与 HTTP 层共享同一个 `VersionService` / `LockService` 实例。测试通过创建全新实例获得隔离，不再依赖反射清理。
 - **并发模型**：同一文档的所有操作通过每文档监视器（per-document monitor）串行化；`LockService` 内部用 `synchronized` 保护锁表并在每次访问时清理过期锁。
 - **保存一致性**：保存流程为"写文件 → 记版本"，版本记录失败时会把文件内容恢复为保存前状态，保证磁盘内容与版本历史不会发散。
+- **持久化**：每个服务拥有自己的元数据文件，通过 `JsonStore`（原子写、同步保护）在变更后落盘；锁与在线状态属于易失状态，按设计不持久化，重启后文档的编辑状态从实时锁重新计算。
 
 ## 配置
 
@@ -101,6 +111,8 @@
 | `SHAREDOC_HTTP_PORT` | `8082` | HTTP 监听端口 |
 | `SHAREDOC_DOCUMENT_DIR` | `data/documents` | 当前文档存储目录 |
 | `SHAREDOC_VERSION_DIR` | `data/versions` | 历史版本存储目录 |
+| `SHAREDOC_METADATA_DIR` | `data/metadata` | 元数据（用户/文档/版本索引）目录 |
+| `SHAREDOC_FRONTEND_DIR` | `frontend` | 后端托管的前端静态目录（目录不存在则不托管） |
 | `SHAREDOC_SESSION_TTL_MINUTES` | `30` | 会话滑动过期时间（分钟） |
 | `SHAREDOC_LOCK_TTL_MINUTES` | `10` | 编辑锁过期时间（分钟） |
 | `SHAREDOC_MAX_UPLOAD_BYTES` | `5242880` | 上传大小上限（字节） |
@@ -108,32 +120,42 @@
 
 前端 API 地址默认 `http://localhost:8082/api/v1`，可在加载 `app.js` 之前设置 `window.SHAREDOC_API_BASE` 覆盖。
 
-## 后端启动
+## 启动
 
 ```powershell
 mvn clean compile
 mvn exec:java "-Dexec.mainClass=com.sharedoc.server.ServerMain"
 ```
 
-后端默认监听 `http://localhost:8082`。
+后端默认监听 `http://localhost:8082`，并在该端口直接托管前端页面。
 
-## 前端启动
+### 方式一：后端托管前端（推荐）
 
-前端是静态页面，需要一个静态服务器（默认 CORS 配置允许 8003 端口）：
+启动后直接在浏览器打开：
+
+```text
+http://localhost:8082/
+```
+
+前后端同源，无需额外的静态服务器，也不涉及跨域。
+
+### 方式二：独立静态服务器（可选）
+
+如果想单独跑前端（例如改前端时用热重载工具），仍可用静态服务器：
 
 ```bash
 cd frontend
 python -m http.server 8003
 ```
 
-然后打开 `http://localhost:8003/`。
+然后打开 `http://localhost:8003/`。此模式为跨域访问，默认 CORS 配置已允许 8003 端口；其他端口需通过 `SHAREDOC_CORS_ORIGINS` 放行。
 
-## 默认测试账号
+## 默认账号
 
 - `admin / 123456`（ADMIN 角色，可回滚任意文档）
 - `user / 123456`（USER 角色）
 
-账号定义在 `UserService` 构造函数中，密码以 PBKDF2 哈希形式存储；服务重启后内存状态会重置。新账号可通过登录页的"立即注册"入口创建。
+首次启动时若 `data/metadata/users.json` 不存在，会自动创建这两个账号（密码以 PBKDF2 哈希存储）。此后账号数据从该文件加载，新注册的用户会一并持久化，重启不丢失。新账号可通过登录页的"立即注册"入口创建。
 
 ## 主要接口
 
@@ -163,18 +185,18 @@ python -m http.server 8003
 mvn test
 ```
 
-当前共 36 个测试，覆盖：
+当前共 40 个测试，覆盖：
 
 - 文档服务：上传 / 预览 / 下载、区间锁并行与排队晋升、坐标平移、补丁合并、并发保存串行化、回滚权限、文件名路径穿越净化、上传大小限制
 - 锁服务：过期锁自动释放、过期后排队锁晋升
 - 版本服务：长补丁链自动快照与重建正确性
 - 用户服务：登录 / 注册 / 登出释放锁、角色固定 USER、密码不外泄
-- HTTP 层：完整冒烟流程、未认证请求 401 且不泄露数据（回归测试）、注册无法提权、非所有者回滚 403、登录响应不含密码
+- 持久化：文档/版本/用户跨“重启”（重建服务实例）恢复、ID 不冲突
+- HTTP 层：完整冒烟流程、未认证请求 401 且不泄露数据（回归测试）、CORS 预检放行、注册无法提权、非所有者回滚 403、登录响应不含密码
 
 ## 当前限制
 
-- 用户、文档元数据和编辑锁保存在内存中，服务重启后会重置（文档与版本文件仍保留在 `data/` 目录下，但重启后不会自动加载）
-- 单节点部署，未考虑多实例横向扩展
-- 前端是静态页面，需要单独启动静态文件服务
+- 数据持久化为本地 JSON 文件 + 文件系统，单节点部署，未考虑多实例横向扩展或数据库
+- 编辑锁与在线状态按设计保存在内存中，重启后清空（文档内容、版本、账号会从 `data/` 恢复）
 - 版本差异展示使用前后缀对比 / 补丁片段，不是完整的 Myers diff
 - 中文输入法（IME）合成输入在区间锁边界处的行为未做专门处理

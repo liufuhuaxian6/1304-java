@@ -42,6 +42,7 @@ public final class TestStateHelper {
     private static void deleteDataDirectories() {
         deleteDirectory(Path.of(ServerConfig.DOCUMENT_STORAGE_PATH));
         deleteDirectory(Path.of(ServerConfig.VERSION_STORAGE_PATH));
+        deleteDirectory(Path.of(ServerConfig.METADATA_STORAGE_PATH));
     }
 
     private static void deleteDirectory(Path path) {

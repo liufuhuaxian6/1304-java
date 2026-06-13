@@ -1,33 +1,71 @@
 package com.sharedoc.service;
 
+import com.fasterxml.jackson.core.type.TypeReference;
 import com.sharedoc.model.ErrorCodes;
 import com.sharedoc.model.Response;
 import com.sharedoc.model.User;
+import com.sharedoc.server.ServerConfig;
+import com.sharedoc.storage.JsonStore;
+import com.sharedoc.storage.StoredUser;
 import com.sharedoc.util.IdGenerator;
 import com.sharedoc.util.PasswordHasher;
 
+import java.nio.file.Path;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * User service.
- * Manages login, logout, and registration with in-memory user data.
- * Passwords are stored as PBKDF2 hashes; user objects returned to callers
- * never carry the password hash.
+ * Manages login, logout, and registration. Accounts are persisted to
+ * {@code users.json} (password hashes included); online status stays in
+ * memory only. User objects returned to callers never carry the hash.
  */
 public class UserService {
     private final Map<String, User> users = new ConcurrentHashMap<>();
     private final Map<String, User> onlineUsers = new ConcurrentHashMap<>();
     private final DocumentService documentService;
+    private final JsonStore userStore;
 
     public UserService() {
         this(new DocumentService());
     }
 
     public UserService(DocumentService documentService) {
+        this(documentService, new JsonStore(Path.of(ServerConfig.METADATA_STORAGE_PATH, "users.json")));
+    }
+
+    public UserService(DocumentService documentService, JsonStore userStore) {
         this.documentService = documentService;
-        users.put("admin", new User("U-ADMIN", "admin", PasswordHasher.hash("123456"), "ADMIN"));
-        users.put("user", new User("U-DEMO", "user", PasswordHasher.hash("123456"), "USER"));
+        this.userStore = userStore;
+        loadOrSeedUsers();
+    }
+
+    private void loadOrSeedUsers() {
+        List<StoredUser> stored = userStore.read(new TypeReference<List<StoredUser>>() { });
+        if (stored == null || stored.isEmpty()) {
+            users.put("admin", new User("U-ADMIN", "admin", PasswordHasher.hash("123456"), "ADMIN"));
+            users.put("user", new User("U-DEMO", "user", PasswordHasher.hash("123456"), "USER"));
+            persist();
+            return;
+        }
+
+        long maxId = 0;
+        for (StoredUser record : stored) {
+            users.put(record.getUsername(),
+                    new User(record.getUserId(), record.getUsername(), record.getPassword(), record.getRole()));
+            maxId = Math.max(maxId, IdGenerator.numericSuffix(record.getUserId()));
+        }
+        IdGenerator.ensureUserSequenceAtLeast(maxId + 1);
+    }
+
+    private void persist() {
+        List<StoredUser> records = new ArrayList<>();
+        for (User user : users.values()) {
+            records.add(new StoredUser(user.getUserId(), user.getUsername(), user.getPassword(), user.getRole()));
+        }
+        userStore.write(records);
     }
 
     public Response login(String username, String password) {
@@ -78,6 +116,7 @@ public class UserService {
 
         User user = new User(IdGenerator.nextUserId(), username, PasswordHasher.hash(password), "USER");
         users.put(username, user);
+        persist();
         return Response.ok("注册成功", sanitized(user));
     }
 
