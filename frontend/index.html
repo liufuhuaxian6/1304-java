@@ -1,150 +1,201 @@
 <!DOCTYPE html>
-<html lang="zh-CN">
+<html lang="zh-CN" data-theme="dark">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>共享文档管理系统</title>
-    <script src="https://unpkg.com/vue@3/dist/vue.global.js"></script>
-    <script src="https://cdn.tailwindcss.com"></script>
-    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
-    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
+    <title>ShareDoc · 协同文档</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/atom-one-dark.min.css">
     <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+    <script src="https://unpkg.com/vue@3/dist/vue.global.js"></script>
+    <link rel="stylesheet" href="styles.css">
 </head>
-<body class="bg-gray-100 min-h-screen">
-<div id="app" v-cloak>
-    <nav class="bg-white shadow-md p-4 flex justify-between items-center" v-if="user">
-        <h1 class="text-xl font-bold text-blue-600">共享文档系统</h1>
-        <div class="flex items-center gap-4">
-            <span class="text-gray-600">欢迎, {{ user.username }}</span>
-            <button type="button" @click="openPasswordDialog" class="text-gray-500 hover:text-gray-700">修改密码</button>
-            <button type="button" @click="logout" class="text-red-500 hover:text-red-700">登出</button>
-        </div>
-    </nav>
+<body>
+<!-- icon sprite -->
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+    <symbol id="i-upload" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" d="M12 16V4m0 0l-5 5m5-5l5 5M5 20h14"/></symbol>
+    <symbol id="i-download" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" d="M12 4v12m0 0l5-5m-5 5l-5-5M5 20h14"/></symbol>
+    <symbol id="i-history" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" d="M3 12a9 9 0 1 0 3-6.7L3 8m0 0V4m0 4h4m5-1v5l3 2"/></symbol>
+    <symbol id="i-trash" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" d="M4 7h16M9 7V5a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2m2 0v12a1 1 0 0 1-1 1H7a1 1 0 0 1-1-1V7m4 4v6m4-6v6"/></symbol>
+    <symbol id="i-edit" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" d="M4 20h4L19 9l-4-4L4 16v4zM14 6l4 4"/></symbol>
+    <symbol id="i-refresh" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" d="M4 12a8 8 0 0 1 14-5.3L20 8m0 0V3m0 5h-5M20 12a8 8 0 0 1-14 5.3L4 16m0 0v5m0-5h5"/></symbol>
+    <symbol id="i-search" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" d="M11 19a8 8 0 1 0 0-16 8 8 0 0 0 0 16zm10 2l-4.3-4.3"/></symbol>
+    <symbol id="i-logout" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" d="M15 12H4m0 0l4-4m-4 4l4 4M9 4h7a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2H9"/></symbol>
+    <symbol id="i-key" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" d="M15 7a4 4 0 1 1-4 4l-7 7v-3H4v-3h3l4-4a4 4 0 0 1 4-4z"/></symbol>
+    <symbol id="i-close" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" d="M6 6l12 12M18 6L6 18"/></symbol>
+    <symbol id="i-back" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" d="M15 18l-6-6 6-6"/></symbol>
+    <symbol id="i-save" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" d="M5 4h11l3 3v13a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V5a1 1 0 0 1 1-1zm3 0v5h7V4M8 21v-6h8v6"/></symbol>
+    <symbol id="i-eye" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" d="M2 12s4-7 10-7 10 7 10 7-4 7-10 7S2 12 2 12z"/><circle cx="12" cy="12" r="3" fill="none" stroke="currentColor" stroke-width="2"/></symbol>
+    <symbol id="i-sun" viewBox="0 0 24 24"><circle cx="12" cy="12" r="4" fill="none" stroke="currentColor" stroke-width="2"/><path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" d="M12 2v2m0 16v2M4.9 4.9l1.4 1.4m11.4 11.4l1.4 1.4M2 12h2m16 0h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></symbol>
+    <symbol id="i-moon" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/></symbol>
+    <symbol id="i-plus" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" d="M12 5v14M5 12h14"/></symbol>
+    <symbol id="i-users" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" d="M16 19v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2M9 9a3 3 0 1 0 0-6 3 3 0 0 0 0 6zm13 10v-2a4 4 0 0 0-3-3.9M16 3.1A4 4 0 0 1 16 11"/></symbol>
+    <symbol id="i-doc" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8l-5-5zm0 0v5h5"/></symbol>
+    <symbol id="i-rotate" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" d="M3 12a9 9 0 1 0 9-9 9 9 0 0 0-6.7 3L3 8m0 0V4m0 4h4"/></symbol>
+</svg>
 
-    <div v-if="!user" class="flex items-center justify-center min-h-screen">
-        <div class="bg-white p-8 rounded-lg shadow-lg w-96">
-            <h2 class="text-2xl font-bold mb-6 text-center text-gray-800">{{ showRegister ? '注册账号' : '系统登录' }}</h2>
-            <template v-if="!showRegister">
-                <div class="mb-4">
-                    <label class="block text-gray-700 mb-2">用户名</label>
-                    <input v-model="loginForm.username" type="text" class="w-full border rounded p-2 focus:outline-none focus:border-blue-500">
-                </div>
-                <div class="mb-6">
-                    <label class="block text-gray-700 mb-2">密码</label>
-                    <input v-model="loginForm.password" type="password" @keyup.enter="login" class="w-full border rounded p-2 focus:outline-none focus:border-blue-500">
-                </div>
-                <button type="button" @click="login" class="w-full bg-blue-500 text-white rounded p-2 hover:bg-blue-600">登录</button>
-            </template>
-            <template v-else>
-                <div class="mb-4">
-                    <label class="block text-gray-700 mb-2">用户名</label>
-                    <input v-model="registerForm.username" type="text" class="w-full border rounded p-2 focus:outline-none focus:border-blue-500">
-                </div>
-                <div class="mb-4">
-                    <label class="block text-gray-700 mb-2">密码</label>
-                    <input v-model="registerForm.password" type="password" class="w-full border rounded p-2 focus:outline-none focus:border-blue-500">
-                </div>
-                <div class="mb-6">
-                    <label class="block text-gray-700 mb-2">确认密码</label>
-                    <input v-model="registerForm.confirm" type="password" @keyup.enter="register" class="w-full border rounded p-2 focus:outline-none focus:border-blue-500">
-                </div>
-                <button type="button" @click="register" class="w-full bg-green-500 text-white rounded p-2 hover:bg-green-600">注册</button>
-            </template>
-            <p class="mt-4 text-center text-sm text-gray-500">
-                {{ showRegister ? '已有账号？' : '没有账号？' }}
-                <button type="button" @click="toggleRegister" class="text-blue-500 hover:text-blue-700 underline">
-                    {{ showRegister ? '返回登录' : '立即注册' }}
-                </button>
+<div id="app" v-cloak>
+
+    <!-- ========== AUTH ========== -->
+    <div v-if="!user" class="auth">
+        <div class="auth-orb auth-orb-a"></div>
+        <div class="auth-orb auth-orb-b"></div>
+        <div class="auth-card">
+            <div class="brand brand-lg">
+                <span class="brand-mark">S</span>
+                <span class="brand-name">ShareDoc</span>
+            </div>
+            <h1 class="auth-title">{{ showRegister ? '创建你的账号' : '欢迎回来' }}</h1>
+            <p class="auth-sub">{{ showRegister ? '注册后即可上传与协同编辑文档' : '登录以继续协同编辑' }}</p>
+
+            <form v-if="!showRegister" @submit.prevent="login" class="auth-form">
+                <label class="field">
+                    <span>用户名</span>
+                    <input v-model="loginForm.username" type="text" autocomplete="username" placeholder="请输入用户名">
+                </label>
+                <label class="field">
+                    <span>密码</span>
+                    <input v-model="loginForm.password" type="password" autocomplete="current-password" placeholder="请输入密码">
+                </label>
+                <p v-if="error" class="auth-error">{{ error }}</p>
+                <button type="submit" class="btn btn-primary btn-block btn-lg">登录</button>
+            </form>
+
+            <form v-else @submit.prevent="register" class="auth-form">
+                <label class="field">
+                    <span>用户名</span>
+                    <input v-model="registerForm.username" type="text" autocomplete="username" placeholder="2-32 位，字母/数字/下划线/中文">
+                </label>
+                <label class="field">
+                    <span>密码</span>
+                    <input v-model="registerForm.password" type="password" autocomplete="new-password" placeholder="6-64 位">
+                </label>
+                <label class="field">
+                    <span>确认密码</span>
+                    <input v-model="registerForm.confirm" type="password" autocomplete="new-password" placeholder="再次输入密码">
+                </label>
+                <p v-if="error" class="auth-error">{{ error }}</p>
+                <button type="submit" class="btn btn-primary btn-block btn-lg">注册</button>
+            </form>
+
+            <p class="auth-switch">
+                {{ showRegister ? '已经有账号了？' : '还没有账号？' }}
+                <a href="#" @click.prevent="toggleRegister">{{ showRegister ? '去登录' : '立即注册' }}</a>
             </p>
-            <p v-if="error" class="text-red-500 mt-4 text-center">{{ error }}</p>
         </div>
     </div>
 
-    <div v-else class="container mx-auto p-4 mt-4">
-        <div v-if="currentView === 'list'">
-            <div class="flex justify-between items-center mb-6">
-                <h2 class="text-2xl font-bold text-gray-800">文档列表</h2>
+    <!-- ========== APP ========== -->
+    <template v-else>
+        <header class="appbar">
+            <div class="brand" @click="currentView === 'editor' ? backToList() : null" :style="{cursor: currentView==='editor' ? 'pointer':'default'}">
+                <span class="brand-mark">S</span>
+                <span class="brand-name">ShareDoc</span>
+            </div>
+            <div class="appbar-actions">
+                <button class="icon-btn" @click="toggleTheme" :title="theme === 'dark' ? '切换到浅色' : '切换到深色'">
+                    <svg class="ic"><use :href="theme === 'dark' ? '#i-sun' : '#i-moon'"></use></svg>
+                </button>
+                <div class="user-chip">
+                    <span class="avatar" :style="{background: avatarColor(user.username)}">{{ initials(user.username) }}</span>
+                    <span class="user-name">{{ user.username }}</span>
+                </div>
+                <button class="icon-btn" @click="openPasswordDialog" title="修改密码"><svg class="ic"><use href="#i-key"></use></svg></button>
+                <button class="icon-btn icon-btn-danger" @click="logout" title="登出"><svg class="ic"><use href="#i-logout"></use></svg></button>
+            </div>
+        </header>
+
+        <!-- ===== LIBRARY ===== -->
+        <main v-if="currentView === 'list'" class="page">
+            <div class="page-head">
                 <div>
+                    <h1 class="page-title">文档库</h1>
+                    <p class="page-sub">{{ documents.length }} 个文档 · 支持多人区间锁协同编辑</p>
+                </div>
+                <div class="page-tools">
+                    <label class="search">
+                        <svg class="ic"><use href="#i-search"></use></svg>
+                        <input v-model="documentFilter" type="text" placeholder="搜索文档…">
+                    </label>
+                    <button class="icon-btn" @click="fetchDocuments()" title="刷新"><svg class="ic"><use href="#i-refresh"></use></svg></button>
+                    <button class="btn btn-primary" @click="$refs.fileInput.click()">
+                        <svg class="ic"><use href="#i-upload"></use></svg> 上传文档
+                    </button>
                     <input type="file" ref="fileInput" class="hidden" @change="uploadDocument">
-                    <button type="button" @click="$refs.fileInput.click()" class="bg-green-500 text-white px-4 py-2 rounded hover:bg-green-600">
-                        <i class="fas fa-upload mr-2"></i>上传文档
-                    </button>
-                    <button type="button" @click="fetchDocuments()" class="bg-gray-500 text-white px-4 py-2 rounded hover:bg-gray-600 ml-2">
-                        <i class="fas fa-sync-alt mr-2"></i>刷新
-                    </button>
                 </div>
             </div>
 
-            <div class="bg-white rounded-lg shadow overflow-hidden">
-                <table class="min-w-full">
-                    <thead class="bg-gray-50">
-                    <tr>
-                        <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">文档名称</th>
-                        <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">所有者</th>
-                        <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">修订号</th>
-                        <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">状态</th>
-                        <th class="px-6 py-3 text-center text-xs font-medium text-gray-500 uppercase">操作</th>
-                    </tr>
-                    </thead>
-                    <tbody class="divide-y divide-gray-200">
-                    <tr v-for="doc in documents" :key="doc.documentId" class="hover:bg-gray-50">
-                        <td class="px-6 py-4">{{ doc.fileName }}</td>
-                        <td class="px-6 py-4">{{ doc.owner }}</td>
-                        <td class="px-6 py-4">r{{ doc.revision }}</td>
-                        <td class="px-6 py-4">
-                            <span v-if="doc.activeLockCount" class="px-2 py-1 text-xs rounded-full bg-yellow-100 text-yellow-800">
-                                {{ doc.activeLockCount }} 人正在编辑
+            <div
+                class="dropzone"
+                :class="{ 'dropzone-active': dragActive }"
+                @dragover.prevent="dragActive = true"
+                @dragleave.prevent="dragActive = false"
+                @drop.prevent="onDrop"
+            >
+                <div v-if="filteredDocuments.length" class="doc-grid">
+                    <article v-for="doc in filteredDocuments" :key="doc.documentId" class="doc-card" @click="viewDocument(doc)">
+                        <div class="doc-card-top">
+                            <span class="file-badge" :style="{ color: langColor(doc.fileName), background: langColor(doc.fileName, 0.14) }">{{ fileExt(doc.fileName) }}</span>
+                            <span class="badge" :class="doc.activeLockCount ? 'badge-live' : 'badge-idle'">
+                                <span class="dot"></span>{{ doc.activeLockCount ? doc.activeLockCount + ' 人编辑中' : '空闲' }}
                             </span>
-                            <span v-else class="px-2 py-1 text-xs rounded-full bg-green-100 text-green-800">
-                                空闲
-                            </span>
-                        </td>
-                        <td class="px-6 py-4 text-center space-x-2 whitespace-nowrap">
-                            <button type="button" @click="viewDocument(doc)" class="text-blue-500 hover:text-blue-700">查看</button>
-                            <button type="button" @click="downloadDocument(doc)" class="text-gray-500 hover:text-gray-700">下载</button>
-                            <button type="button" @click="openVersions(doc)" class="text-purple-500 hover:text-purple-700">历史版本</button>
-                            <button type="button" @click="renameDocument(doc)" class="text-amber-600 hover:text-amber-800">重命名</button>
-                            <button type="button" @click="deleteDocument(doc)" class="text-red-500 hover:text-red-700">删除</button>
-                        </td>
-                    </tr>
-                    <tr v-if="documents.length === 0">
-                        <td colspan="5" class="px-6 py-4 text-center text-gray-500">暂无文档。</td>
-                    </tr>
-                    </tbody>
-                </table>
-            </div>
-        </div>
-
-        <div v-if="currentView === 'editor'" class="bg-white rounded-lg shadow p-6">
-            <div class="flex justify-between items-center mb-4 border-b pb-4">
-                <div class="flex items-center gap-4 flex-wrap">
-                    <button type="button" @click="backToList" class="text-gray-500 hover:text-gray-700"><i class="fas fa-arrow-left mr-1"></i>返回</button>
-                    <h2 class="text-xl font-bold">{{ currentDocument?.fileName }}</h2>
-                    <span class="px-2 py-1 text-xs rounded bg-slate-100 text-slate-700">r{{ revision }}</span>
-                    <span v-if="hasEditLock" class="px-2 py-1 text-xs rounded bg-blue-100 text-blue-800">正在编辑 {{ currentCursorLabel }}</span>
-                    <span v-if="isCodeFile" class="px-2 py-1 text-xs rounded bg-slate-100 text-slate-700">{{ languageLabel }}</span>
+                        </div>
+                        <h3 class="doc-name" :title="doc.fileName">{{ doc.fileName }}</h3>
+                        <div class="doc-meta">
+                            <span class="avatar avatar-sm" :style="{background: avatarColor(doc.owner)}">{{ initials(doc.owner) }}</span>
+                            <span>{{ doc.owner }}</span>
+                            <span class="rev">r{{ doc.revision }}</span>
+                        </div>
+                        <div class="doc-actions" @click.stop>
+                            <button class="chip-btn chip-btn-primary" @click="viewDocument(doc)"><svg class="ic"><use href="#i-eye"></use></svg>打开</button>
+                            <button class="chip-btn" @click="openVersions(doc)" title="历史版本"><svg class="ic"><use href="#i-history"></use></svg></button>
+                            <button class="chip-btn" @click="downloadDocument(doc)" title="下载"><svg class="ic"><use href="#i-download"></use></svg></button>
+                            <button class="chip-btn" @click="renameDocument(doc)" title="重命名"><svg class="ic"><use href="#i-edit"></use></svg></button>
+                            <button class="chip-btn chip-btn-danger" @click="deleteDocument(doc)" title="删除"><svg class="ic"><use href="#i-trash"></use></svg></button>
+                        </div>
+                    </article>
                 </div>
-                <div class="space-x-2">
-                    <button type="button" @click="openVersions(currentDocument)" class="bg-purple-500 text-white px-4 py-2 rounded hover:bg-purple-600">
-                        <i class="fas fa-history mr-1"></i>历史版本
-                    </button>
-                    <button v-if="hasEditLock" type="button" @click="saveDocument" class="bg-blue-500 text-white px-4 py-2 rounded hover:bg-blue-600">立即保存</button>
+
+                <div v-else class="empty">
+                    <div class="empty-art"><svg class="ic"><use href="#i-doc"></use></svg></div>
+                    <h3>{{ documentFilter ? '没有匹配的文档' : '还没有文档' }}</h3>
+                    <p>{{ documentFilter ? '换个关键词试试' : '把文件拖到这里，或点击右上角上传' }}</p>
                 </div>
             </div>
+        </main>
 
-            <div class="grid gap-4 lg:grid-cols-[minmax(0,1fr)_20rem]">
-                <div>
-                    <div class="editor-shell">
-                        <pre
-                            ref="highlightRef"
-                            class="editor-highlight hljs"
-                            aria-hidden="true"
-                        ><code v-html="highlightedEditorContent"></code></pre>
+        <!-- ===== EDITOR ===== -->
+        <main v-else-if="currentView === 'editor'" class="editor">
+            <div class="editor-bar">
+                <div class="editor-bar-left">
+                    <button class="icon-btn" @click="backToList" title="返回"><svg class="ic"><use href="#i-back"></use></svg></button>
+                    <span class="file-badge file-badge-sm" :style="{ color: langColor(currentDocument?.fileName), background: langColor(currentDocument?.fileName, 0.14) }">{{ fileExt(currentDocument?.fileName) }}</span>
+                    <h2 class="editor-title">{{ currentDocument?.fileName }}</h2>
+                    <span class="tag">r{{ revision }}</span>
+                    <span class="tag tag-soft">{{ languageLabel }}</span>
+                </div>
+                <div class="editor-bar-right">
+                    <span class="save-state" :class="'save-' + saveStatusKind">
+                        <span class="dot"></span>{{ saveStatusLabel }}
+                    </span>
+                    <button class="btn btn-ghost" @click="openVersions(currentDocument)"><svg class="ic"><use href="#i-history"></use></svg>历史</button>
+                    <button class="btn btn-primary" :disabled="!hasEditLock" @click="saveDocument"><svg class="ic"><use href="#i-save"></use></svg>保存</button>
+                </div>
+            </div>
+
+            <div class="editor-body">
+                <div class="code-pane">
+                    <div ref="gutterRef" class="gutter"><div v-for="n in lineCount" :key="n" class="gutter-line">{{ n }}</div></div>
+                    <div class="code-area">
+                        <pre ref="highlightRef" class="code-highlight hljs" aria-hidden="true"><code v-html="highlightedEditorContent"></code></pre>
                         <textarea
                             ref="editorRef"
                             v-model="documentContent"
-                            class="editor-input"
+                            class="code-input"
                             spellcheck="false"
+                            wrap="off"
                             @beforeinput="handleAutoBeforeInput"
                             @input="handleEditorInput"
                             @paste="handleEditorPaste"
@@ -156,209 +207,154 @@
                     </div>
                 </div>
 
-                <aside class="border rounded-lg bg-slate-50 p-4">
-                    <h3 class="text-sm font-semibold text-slate-800 mb-3">协同状态</h3>
-                    <p class="text-xs text-slate-600 mb-2">我的光标: {{ currentCursorLabel }}</p>
-
-                    <div class="mb-4">
-                        <div class="text-xs font-semibold text-slate-700 mb-1">在线用户（{{ onlineUsers.length }}）</div>
-                        <div class="flex flex-wrap gap-1">
-                            <span v-for="name in onlineUsers" :key="name" class="px-2 py-0.5 text-xs rounded-full bg-emerald-100 text-emerald-800">{{ name }}</span>
-                            <span v-if="onlineUsers.length === 0" class="text-xs text-slate-400">暂无</span>
+                <aside class="collab">
+                    <section class="collab-block">
+                        <div class="collab-head"><svg class="ic"><use href="#i-users"></use></svg>在线 · {{ onlineUsers.length }}</div>
+                        <div class="avatar-row">
+                            <span v-for="name in onlineUsers" :key="name" class="avatar" :style="{background: avatarColor(name)}" :title="name">{{ initials(name) }}</span>
+                            <span v-if="!onlineUsers.length" class="muted">暂无</span>
                         </div>
-                    </div>
+                    </section>
 
-                    <div class="space-y-2">
-                        <div v-for="editor in activeEditors" :key="editor.lockId" class="rounded border border-slate-200 bg-white p-3 text-xs">
-                            <div class="font-semibold text-slate-800">{{ editor.owner }}</div>
-                            <div class="text-slate-600">{{ editor.statusLabel }} {{ editor.locationLabel }}</div>
+                    <section class="collab-block">
+                        <div class="collab-head">正在编辑</div>
+                        <div v-if="activeEditors.length" class="editor-list">
+                            <div v-for="ed in activeEditors" :key="ed.lockId" class="editor-item">
+                                <span class="avatar avatar-sm" :style="{background: avatarColor(ed.owner)}">{{ initials(ed.owner) }}</span>
+                                <div class="editor-item-info">
+                                    <div class="editor-item-name">{{ ed.owner }}<span v-if="ed.queued" class="mini-tag">排队 #{{ ed.queuePosition }}</span></div>
+                                    <div class="editor-item-loc">{{ ed.locationLabel }}</div>
+                                </div>
+                            </div>
                         </div>
-                        <p v-if="activeEditors.length === 0" class="text-xs text-slate-500">当前没有用户正在编辑。</p>
-                    </div>
+                        <p v-else class="muted">当前没有用户正在编辑</p>
+                    </section>
+
+                    <section class="collab-block collab-foot">
+                        <div class="kv"><span>我的光标</span><b>{{ currentCursorLabel }}</b></div>
+                        <p class="hint">直接键入即可在光标处申请行级区间锁；与他人不重叠的区间可同时编辑。</p>
+                    </section>
                 </aside>
             </div>
-        </div>
-    </div>
+        </main>
+    </template>
 
-    <div v-if="showVersions" class="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-40 p-4" @click.self="closeVersions">
-        <div class="bg-white rounded-lg shadow-xl w-full max-w-3xl max-h-[80vh] flex flex-col">
-            <div class="flex justify-between items-center border-b p-4">
-                <h3 class="text-lg font-bold text-gray-800">历史版本 - {{ versionDoc?.fileName }}</h3>
-                <button type="button" @click="closeVersions" class="text-gray-400 hover:text-gray-600"><i class="fas fa-times"></i></button>
-            </div>
-            <div class="p-4 overflow-y-auto">
-                <p class="text-xs text-gray-500 mb-3"><i class="fas fa-info-circle mr-1"></i>存在活动锁时禁止回滚，回滚成功后会新增一条版本记录。</p>
-                <table class="min-w-full text-sm">
-                    <thead class="bg-gray-50">
-                    <tr>
-                        <th class="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase">版本号</th>
-                        <th class="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase">操作</th>
-                        <th class="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase">操作人</th>
-                        <th class="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase">时间</th>
-                        <th class="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase">备注</th>
-                        <th class="px-3 py-2 text-center text-xs font-medium text-gray-500 uppercase">操作</th>
-                    </tr>
-                    </thead>
-                    <tbody class="divide-y divide-gray-200">
-                    <tr
-                        v-for="v in versions"
-                        :key="v.versionId"
-                        class="hover:bg-gray-50 cursor-pointer"
-                        :class="selectedVersion?.versionId === v.versionId ? 'bg-blue-50' : ''"
-                        @click="selectVersion(v)"
-                    >
-                        <td class="px-3 py-2 font-mono">{{ v.versionId }}</td>
-                        <td class="px-3 py-2">
-                            <span class="px-2 py-1 text-xs rounded-full bg-blue-100 text-blue-800">{{ opLabel(v.operationType) }}</span>
-                        </td>
-                        <td class="px-3 py-2">{{ v.editor }}</td>
-                        <td class="px-3 py-2 whitespace-nowrap text-gray-600">{{ v.editTime }}</td>
-                        <td class="px-3 py-2 text-gray-600">{{ v.comment }}</td>
-                        <td class="px-3 py-2 text-center space-x-3 whitespace-nowrap">
-                            <button type="button" @click.stop="downloadVersion(v)" class="text-gray-600 hover:text-gray-900">下载</button>
-                            <button type="button" @click.stop="rollbackVersion(v)" class="text-orange-600 hover:text-orange-800">回滚</button>
-                        </td>
-                    </tr>
-                    <tr v-if="isLoadingVersions">
-                        <td colspan="6" class="px-3 py-6 text-center text-gray-500">正在加载历史版本...</td>
-                    </tr>
-                    <tr v-else-if="versions.length === 0">
-                        <td colspan="6" class="px-3 py-6 text-center text-gray-500">暂无历史版本</td>
-                    </tr>
-                    </tbody>
-                </table>
-
-                <div class="mt-4 rounded-lg border border-slate-200 bg-slate-50 p-4">
-                    <div class="flex items-center justify-between mb-3">
-                        <h4 class="text-sm font-semibold text-slate-800">
-                            版本改动
-                            <span v-if="selectedVersion" class="font-mono text-slate-500">({{ selectedVersion.versionId }})</span>
-                        </h4>
-                        <span v-if="versionDiff?.previousVersion" class="text-xs text-slate-500">
-                            相比 {{ versionDiff.previousVersion.versionId }}
-                        </span>
-                        <span v-else-if="selectedVersion" class="text-xs text-slate-500">相比空文档</span>
+    <!-- ===== VERSION DRAWER ===== -->
+    <transition name="drawer">
+        <div v-if="showVersions" class="drawer-scrim" @click.self="closeVersions">
+            <div class="drawer">
+                <div class="drawer-head">
+                    <div>
+                        <h3>历史版本</h3>
+                        <p class="muted">{{ versionDoc?.fileName }}</p>
+                    </div>
+                    <button class="icon-btn" @click="closeVersions"><svg class="ic"><use href="#i-close"></use></svg></button>
+                </div>
+                <div class="drawer-body">
+                    <div class="timeline">
+                        <p v-if="isLoadingVersions" class="muted pad">正在加载…</p>
+                        <p v-else-if="!versions.length" class="muted pad">暂无历史版本</p>
+                        <div
+                            v-for="v in versions"
+                            :key="v.versionId"
+                            class="tl-item"
+                            :class="{ active: selectedVersion?.versionId === v.versionId }"
+                            @click="selectVersion(v)"
+                        >
+                            <div class="tl-dot" :class="'op-' + v.operationType"></div>
+                            <div class="tl-body">
+                                <div class="tl-row">
+                                    <span class="tl-version">{{ v.versionId }}</span>
+                                    <span class="tag tag-soft">{{ opLabel(v.operationType) }}</span>
+                                    <span class="tag tag-soft" v-if="v.storageType === 'PATCH'">{{ v.patchCount }} 处改动</span>
+                                </div>
+                                <div class="tl-meta"><b>{{ v.editor }}</b> · {{ v.editTime }}</div>
+                                <div v-if="v.comment" class="tl-comment">{{ v.comment }}</div>
+                                <div class="tl-actions" @click.stop>
+                                    <button class="chip-btn" @click="downloadVersion(v)"><svg class="ic"><use href="#i-download"></use></svg>下载</button>
+                                    <button class="chip-btn chip-btn-warn" @click="rollbackVersion(v)"><svg class="ic"><use href="#i-rotate"></use></svg>回滚</button>
+                                </div>
+                            </div>
+                        </div>
                     </div>
 
-                    <p v-if="!selectedVersion" class="text-sm text-slate-500">点击上方某个版本，查看它相对上一个版本的改动。</p>
-                    <p v-else-if="isLoadingVersionDiff" class="text-sm text-slate-500">正在加载版本差异...</p>
-                    <p v-else-if="versionDiff && versionDiff.changes.length === 0" class="text-sm text-slate-500">该版本与上一个版本内容一致。</p>
-
-                    <div v-else-if="versionDiff" class="space-y-3">
-                        <div v-for="(change, index) in versionDiff.changes" :key="index" class="rounded border border-slate-200 bg-white p-3">
-                            <div class="mb-2 text-xs text-slate-500">
-                                {{ changeTypeLabel(change.type) }}，原第 {{ change.removedLine }} 行 / 新第 {{ change.addedLine }} 行
-                            </div>
-                            <div v-if="change.removedText" class="mb-2">
-                                <div class="text-xs font-semibold text-red-700 mb-1">删除内容</div>
-                                <pre class="whitespace-pre-wrap rounded bg-red-50 p-2 text-xs text-red-800">{{ change.removedText }}</pre>
-                            </div>
-                            <div v-if="change.addedText">
-                                <div class="text-xs font-semibold text-green-700 mb-1">新增内容</div>
-                                <pre class="whitespace-pre-wrap rounded bg-green-50 p-2 text-xs text-green-800">{{ change.addedText }}</pre>
+                    <div class="diff">
+                        <div class="diff-head">
+                            <h4>版本改动</h4>
+                            <span v-if="selectedVersion" class="muted">{{ selectedVersion.versionId }}<template v-if="versionDiff?.previousVersion"> ← {{ versionDiff.previousVersion.versionId }}</template></span>
+                        </div>
+                        <p v-if="!selectedVersion" class="muted pad">选择左侧版本查看相对上一版本的改动。</p>
+                        <p v-else-if="isLoadingVersionDiff" class="muted pad">正在加载差异…</p>
+                        <p v-else-if="versionDiff && !versionDiff.changes.length" class="muted pad">与上一个版本内容一致。</p>
+                        <div v-else-if="versionDiff" class="diff-list">
+                            <div v-for="(c, i) in versionDiff.changes" :key="i" class="diff-block">
+                                <div class="diff-tag">{{ changeTypeLabel(c.type) }} · 原第 {{ c.removedLine }} 行 / 新第 {{ c.addedLine }} 行</div>
+                                <pre v-if="c.removedText" class="diff-line diff-del">{{ c.removedText }}</pre>
+                                <pre v-if="c.addedText" class="diff-line diff-add">{{ c.addedText }}</pre>
                             </div>
                         </div>
                     </div>
                 </div>
             </div>
         </div>
-    </div>
+    </transition>
 
-    <div v-if="showPasswordDialog" class="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-40 p-4" @click.self="closePasswordDialog">
-        <div class="bg-white rounded-lg shadow-xl w-full max-w-sm p-6">
-            <div class="flex justify-between items-center mb-4">
-                <h3 class="text-lg font-bold text-gray-800">修改密码</h3>
-                <button type="button" @click="closePasswordDialog" class="text-gray-400 hover:text-gray-600"><i class="fas fa-times"></i></button>
-            </div>
-            <div class="mb-3">
-                <label class="block text-gray-700 mb-1 text-sm">当前密码</label>
-                <input v-model="passwordForm.current" type="password" class="w-full border rounded p-2 focus:outline-none focus:border-blue-500">
-            </div>
-            <div class="mb-3">
-                <label class="block text-gray-700 mb-1 text-sm">新密码（6-64 位）</label>
-                <input v-model="passwordForm.next" type="password" class="w-full border rounded p-2 focus:outline-none focus:border-blue-500">
-            </div>
-            <div class="mb-4">
-                <label class="block text-gray-700 mb-1 text-sm">确认新密码</label>
-                <input v-model="passwordForm.confirm" type="password" @keyup.enter="changePassword" class="w-full border rounded p-2 focus:outline-none focus:border-blue-500">
-            </div>
-            <div class="flex justify-end gap-2">
-                <button type="button" @click="closePasswordDialog" class="px-4 py-2 rounded border text-gray-600 hover:bg-gray-50">取消</button>
-                <button type="button" @click="changePassword" class="px-4 py-2 rounded bg-blue-500 text-white hover:bg-blue-600">确认修改</button>
+    <!-- ===== PASSWORD MODAL ===== -->
+    <transition name="modal">
+        <div v-if="showPasswordDialog" class="scrim" @click.self="closePasswordDialog">
+            <div class="modal">
+                <div class="modal-head"><h3>修改密码</h3><button class="icon-btn" @click="closePasswordDialog"><svg class="ic"><use href="#i-close"></use></svg></button></div>
+                <form @submit.prevent="changePassword" class="modal-body">
+                    <label class="field"><span>当前密码</span><input v-model="passwordForm.current" type="password"></label>
+                    <label class="field"><span>新密码（6-64 位）</span><input v-model="passwordForm.next" type="password"></label>
+                    <label class="field"><span>确认新密码</span><input v-model="passwordForm.confirm" type="password"></label>
+                    <div class="modal-foot">
+                        <button type="button" class="btn btn-ghost" @click="closePasswordDialog">取消</button>
+                        <button type="submit" class="btn btn-primary">确认修改</button>
+                    </div>
+                </form>
             </div>
         </div>
-    </div>
+    </transition>
 
-    <div v-if="toast" class="fixed bottom-4 right-4 bg-gray-800 text-white px-6 py-3 rounded shadow-lg transition-opacity z-50">
-        {{ toast }}
-    </div>
+    <!-- ===== CONFIRM MODAL ===== -->
+    <transition name="modal">
+        <div v-if="confirmState.open" class="scrim" @click.self="resolveConfirm(false)">
+            <div class="modal modal-sm">
+                <div class="modal-head"><h3>{{ confirmState.title }}</h3></div>
+                <div class="modal-body">
+                    <p class="modal-text">{{ confirmState.message }}</p>
+                    <div class="modal-foot">
+                        <button class="btn btn-ghost" @click="resolveConfirm(false)">取消</button>
+                        <button class="btn" :class="confirmState.kind === 'danger' ? 'btn-danger' : 'btn-primary'" @click="resolveConfirm(true)">{{ confirmState.confirmText }}</button>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </transition>
+
+    <!-- ===== PROMPT MODAL ===== -->
+    <transition name="modal">
+        <div v-if="promptState.open" class="scrim" @click.self="resolvePrompt(null)">
+            <div class="modal modal-sm">
+                <div class="modal-head"><h3>{{ promptState.title }}</h3></div>
+                <form @submit.prevent="resolvePrompt(promptState.value)" class="modal-body">
+                    <label class="field"><span>{{ promptState.label }}</span><input v-model="promptState.value" type="text" ref="promptInput"></label>
+                    <div class="modal-foot">
+                        <button type="button" class="btn btn-ghost" @click="resolvePrompt(null)">取消</button>
+                        <button type="submit" class="btn btn-primary">确认</button>
+                    </div>
+                </form>
+            </div>
+        </div>
+    </transition>
+
+    <!-- ===== TOAST ===== -->
+    <transition name="toast">
+        <div v-if="toast" class="toast"><span class="dot"></span>{{ toast }}</div>
+    </transition>
 </div>
 
-<style>
-    [v-cloak] { display: block; }
-
-    .editor-shell {
-        position: relative;
-        height: 24rem;
-        border: 1px solid #cbd5e1;
-        border-radius: 0.375rem;
-        background: #ffffff;
-        overflow: hidden;
-    }
-
-    .editor-highlight,
-    .editor-input {
-        position: absolute;
-        inset: 0;
-        width: 100%;
-        height: 100%;
-        margin: 0;
-        padding: 1rem;
-        border: 0;
-        font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
-        font-size: 0.875rem;
-        line-height: 1.5rem;
-        white-space: pre-wrap;
-        word-break: break-word;
-        overflow: auto;
-        tab-size: 4;
-    }
-
-    /* The highlight layer renders the colored, read-only code underneath. */
-    .editor-highlight {
-        pointer-events: none;
-        background: #ffffff;
-        z-index: 1;
-    }
-
-    /* The textarea sits on top with transparent text so only the colored
-       layer shows through, while its caret and selection stay visible. */
-    .editor-input {
-        resize: none;
-        color: transparent;
-        background: transparent;
-        caret-color: #111827;
-        outline: none;
-        z-index: 2;
-    }
-
-    .editor-input::selection {
-        background: rgba(59, 130, 246, 0.28);
-        color: transparent;
-    }
-
-    .editor-shell:focus-within {
-        border-color: #3b82f6;
-        box-shadow: 0 0 0 1px #3b82f6;
-    }
-
-    pre code.hljs {
-        background: transparent;
-        padding: 0;
-        white-space: pre-wrap;
-        word-break: break-word;
-    }
-</style>
 <script src="app.js"></script>
 </body>
 </html>
