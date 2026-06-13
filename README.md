@@ -128,11 +128,11 @@
 
 ## 启动
 
-开发模式（直接用 Maven 运行）：
+开发模式（直接用 Maven 运行，mainClass 已写入 pom，无需额外参数）：
 
-```powershell
+```bash
 mvn clean compile
-mvn exec:java "-Dexec.mainClass=com.sharedoc.server.ServerMain"
+mvn exec:java
 ```
 
 打包为可执行 fat jar 并运行：

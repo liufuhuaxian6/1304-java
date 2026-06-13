@@ -22,10 +22,10 @@
 mvn clean compile
 ```
 
-启动（开发模式）：
+启动（开发模式，mainClass 已写入 pom，无需额外参数）：
 
 ```bash
-mvn exec:java -Dexec.mainClass="com.sharedoc.server.ServerMain"
+mvn exec:java
 ```
 
 或打包成可执行 fat jar 后运行：
