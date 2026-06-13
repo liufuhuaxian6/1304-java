@@ -1,5 +1,7 @@
 package com.sharedoc.model;
 
+import com.fasterxml.jackson.annotation.JsonIgnore;
+
 import java.io.Serial;
 import java.io.Serializable;
 import java.time.LocalDateTime;
@@ -61,6 +63,7 @@ public class Document implements Serializable {
         this.owner = owner;
     }
 
+    @JsonIgnore
     public String getCurrentPath() {
         return currentPath;
     }

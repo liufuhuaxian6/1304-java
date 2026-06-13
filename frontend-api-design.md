@@ -85,6 +85,25 @@
 
 返回当前登录用户。
 
+### `POST /auth/password`
+
+需要 `Bearer Token`。修改当前登录用户的密码。
+
+请求体：
+
+```json
+{
+  "currentPassword": "旧密码",
+  "newPassword": "新密码"
+}
+```
+
+当前密码不正确返回 `401 INVALID_CREDENTIALS`；新密码不满足长度（6-64）返回 `400`。
+
+### `GET /health`
+
+健康检查，无需认证。`data` 为 `{"status":"UP"}`。
+
 ## 3. 文档接口
 
 ### `GET /documents`
@@ -125,7 +144,25 @@ multipart/form-data
 - 文件大小默认上限 5 MB，超出返回 `413 FILE_TOO_LARGE`。
 - 只允许代码 / 配置 / 文档类扩展名，否则返回 `400 UNSUPPORTED_FILE_TYPE`。
 
-上传后会创建初始完整版本。
+上传后会创建初始完整版本。文档对象不包含内部存储路径（`currentPath` 对客户端隐藏）。
+
+### `DELETE /documents/{documentId}`
+
+删除文档及其全部历史版本文件。仅文档所有者或 `ADMIN` 可删除（否则 `403 FORBIDDEN`），且文档存在活动/排队锁时返回 `409 ACTIVE_LOCKS_PRESENT`。成功后服务端广播 `document-deleted`。
+
+### `PATCH /documents/{documentId}`
+
+重命名文档（仅修改显示文件名，物理文件与历史版本保持原名）。仅所有者或 `ADMIN` 可重命名。
+
+请求体：
+
+```json
+{
+  "fileName": "new-name.md"
+}
+```
+
+新文件名经过净化与类型白名单校验，成功后服务端广播 `document-renamed`。
 
 ### `GET /documents/{documentId}/preview`
 
@@ -240,6 +277,9 @@ GET /documents/{documentId}/events?token=<token>
 - `lock-released`: 有区间锁释放。
 - `content-updated`: 文档局部内容已保存，包含 `start`、`end`、`replacementText`、`revisionBefore`、`revisionAfter`、`editor`、`activeLocks`。
 - `document-rolled-back`: 文档已回滚，其他在线用户应重新加载当前文档内容和版本号。
+- `document-renamed`: 文档已被重命名，载荷含新的 `document`。
+- `document-deleted`: 文档已被删除，前端应返回列表页。
+- `presence-changed`: 在看该文档的用户集合发生变化，载荷为 `{ "onlineUsers": ["admin", ...] }`（连接/断开时触发）。
 
 前端在本地存在未保存编辑时，会把远端 `content-updated` 的服务端坐标映射到当前 textarea 坐标后再应用，避免并发编辑错位。
 
@@ -284,8 +324,6 @@ GET /documents/{documentId}/events?token=<token>
   "previousVersion": {},
   "changes": [
     {
-      "start": 0,
-      "end": 5,
       "type": "REPLACE",
       "removedText": "hello",
       "addedText": "hi",
@@ -296,7 +334,9 @@ GET /documents/{documentId}/events?token=<token>
 }
 ```
 
-`type` 可能为 `ADD`、`DELETE` 或 `REPLACE`。如果目标版本是合并后的 PATCH 版本，`changes` 会列出其中每个修改片段。
+- FULL/快照/回滚版本之间使用**行级 LCS diff**：多处改动会拆成多个 `changes` 块，每块带 `removedLine` / `addedLine`（1 基行号）。
+- PATCH 版本的 `changes` 直接来自其中每个修改片段（带字符级 `start` / `end`）。
+- `type` 可能为 `ADD`、`DELETE` 或 `REPLACE`。
 
 ### `GET /documents/{documentId}/versions/{versionId}/download`
 
@@ -338,8 +378,11 @@ HTTP 状态码由响应中的 `code` 字段决定（服务层与 HTTP 层通过�
 - 注册：`POST /auth/register`
 - 登录态恢复：`GET /auth/me`
 - 登出：`POST /auth/logout`
+- 修改密码：`POST /auth/password`
 - 文档列表：`GET /documents`
 - 上传：`POST /documents`
+- 删除：`DELETE /documents/{id}`
+- 重命名：`PATCH /documents/{id}`
 - 预览/编辑内容加载：`GET /documents/{id}/preview`
 - 下载：`GET /documents/{id}/download`
 - 申请编辑区间：`POST /documents/{id}/lock`

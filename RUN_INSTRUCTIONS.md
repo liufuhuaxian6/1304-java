@@ -22,16 +22,31 @@
 mvn clean compile
 ```
 
-启动：
+启动（开发模式）：
 
 ```bash
 mvn exec:java -Dexec.mainClass="com.sharedoc.server.ServerMain"
+```
+
+或打包成可执行 fat jar 后运行：
+
+```bash
+mvn clean package
+java -jar target/app.jar
+```
+
+或用 Docker（数据持久化到挂载卷）：
+
+```bash
+docker build -t sharedoc .
+docker run -p 8082:8082 -v sharedoc-data:/data sharedoc
 ```
 
 后端启动后会提供：
 
 - HTTP API: `http://localhost:8082`
 - 前端页面: `http://localhost:8082/`（后端直接托管 `frontend/` 目录）
+- 健康检查: `http://localhost:8082/api/v1/health`
 
 ## 3. 打开前端
 
@@ -83,3 +98,12 @@ A: 文档、历史版本和用户账号都会持久化到 `data/` 目录（元�
 
 **Q: 想清空所有数据重新开始怎么办？**  
 A: 停止服务后删除整个 `data/` 目录即可，下次启动会重新创建默认账号和空文档列表。
+
+**Q: 谁能删除或重命名文档？**  
+A: 只有文档所有者或 `ADMIN`（默认 `admin` 账号）。删除会一并清掉该文档的全部历史版本，且文档存在活动编辑锁时不允许删除。删除/重命名后其他在线用户会通过 SSE 实时收到通知。
+
+**Q: 怎么修改密码？**  
+A: 登录后点导航栏的“修改密码”，输入当前密码与新密码（6-64 位）。密码以 PBKDF2 哈希持久化，修改后立即生效。
+
+**Q: 关闭浏览器标签页后，我占用的锁会怎样？**  
+A: 前端在页面卸载时会尽力主动释放锁；即便没释放成功，锁也会在 TTL 后自动过期。

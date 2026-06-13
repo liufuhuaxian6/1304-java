@@ -377,6 +377,73 @@ class DocumentServiceTest {
     }
 
     @Test
+    void deleteDocumentRemovesMetadataVersionsAndFile() {
+        Document document = uploadDocument("admin", "to-delete.md", "bye");
+        String docId = document.getDocumentId();
+        Path storedFile = Path.of(document.getCurrentPath());
+        assertTrue(Files.exists(storedFile));
+
+        Response delete = documentService.deleteDocument("admin", docId, false);
+        assertTrue(delete.isSuccess());
+
+        assertFalse(documentService.documentExists(docId));
+        assertFalse(Files.exists(storedFile), "Stored document file should be deleted");
+        List<?> versions = assertInstanceOf(List.class, versionService.listVersions(docId).getData());
+        assertTrue(versions.isEmpty(), "Version records should be removed");
+
+        Response listResponse = documentService.listDocuments();
+        assertTrue(assertInstanceOf(List.class, listResponse.getData()).isEmpty());
+    }
+
+    @Test
+    void deleteDocumentByNonOwnerIsForbiddenButAdminCan() {
+        Document document = uploadDocument("user", "user-doc.md", "v1");
+        String docId = document.getDocumentId();
+
+        Response forbidden = documentService.deleteDocument("admin-but-not", docId, false);
+        assertFalse(forbidden.isSuccess());
+        assertEquals("FORBIDDEN", forbidden.getCode());
+        assertTrue(documentService.documentExists(docId));
+
+        Response asAdmin = documentService.deleteDocument("someone", docId, true);
+        assertTrue(asAdmin.isSuccess());
+        assertFalse(documentService.documentExists(docId));
+    }
+
+    @Test
+    void deleteDocumentIsRejectedWhileLockHeld() {
+        Document document = uploadDocument("admin", "locked-delete.md", "0123456789");
+        assertTrue(documentService.requestEdit(document.getDocumentId(), "admin", 1L, 0, 2).isSuccess());
+
+        Response delete = documentService.deleteDocument("admin", document.getDocumentId(), false);
+        assertFalse(delete.isSuccess());
+        assertEquals("ACTIVE_LOCKS_PRESENT", delete.getCode());
+        assertTrue(documentService.documentExists(document.getDocumentId()));
+    }
+
+    @Test
+    void renameDocumentChangesDisplayNameOnly() {
+        Document document = uploadDocument("admin", "old-name.md", "content");
+        String originalPath = document.getCurrentPath();
+
+        Response rename = documentService.renameDocument("admin", document.getDocumentId(), "new-name.md", false);
+        assertTrue(rename.isSuccess());
+        Map<String, Object> data = responseData(rename);
+        Document renamed = assertInstanceOf(Document.class, data.get("document"));
+        assertEquals("new-name.md", renamed.getFileName());
+        // Physical file is untouched; only the display name changed.
+        assertEquals(originalPath, renamed.getCurrentPath());
+
+        Response forbidden = documentService.renameDocument("user", document.getDocumentId(), "hijack.md", false);
+        assertFalse(forbidden.isSuccess());
+        assertEquals("FORBIDDEN", forbidden.getCode());
+
+        Response badType = documentService.renameDocument("admin", document.getDocumentId(), "evil.exe", false);
+        assertFalse(badType.isSuccess());
+        assertEquals("UNSUPPORTED_FILE_TYPE", badType.getCode());
+    }
+
+    @Test
     void uploadSanitizesPathTraversalFileName() {
         Response uploadResponse = documentService.uploadDocument("admin", "..\\..\\evil.md", "# attack".getBytes());
 

@@ -25,7 +25,8 @@
 
 ### 文档管理
 
-- 文档列表、上传、下载、在线预览
+- 文档列表、上传、下载、在线预览、重命名、删除
+- 删除会一并清除该文档的全部历史版本文件；仅所有者或 `ADMIN` 可删除/重命名，且删除要求无活动锁
 - 上传文件名经过净化（剥离目录部分、过滤非法字符与控制字符），防止路径穿越
 - 上传大小限制（默认 5 MB）与文件类型白名单
 - 下载使用 RFC 5987 编码的 `Content-Disposition`，中文文件名可正常下载
@@ -35,15 +36,17 @@
 - 细粒度区间锁：不同用户可并行编辑同一文档的不重叠区间
 - 重叠区间进入 FIFO 等待队列，前序锁释放后自动晋升并通过 SSE 通知
 - 活动锁带 TTL（默认 10 分钟）：浏览器异常关闭、断网等情况下的“僵尸锁”会自动过期释放，不会永久阻塞他人编辑
+- 关闭页面/标签时通过 `beforeunload` + `fetch keepalive` 主动释放锁，不必等 TTL
+- 在线用户列表（presence）：SSE 连接/断开时广播在看该文档的用户集合
 - 局部内容保存（PATCH，只提交锁区间文本），保存后其他锁坐标自动平移
-- SSE 推送：锁申请 / 释放 / 排队晋升、内容局部更新、版本回滚
+- SSE 推送：锁申请 / 释放 / 排队晋升、内容局部更新、版本回滚、文档重命名/删除、在线状态变化
 
 ### 版本控制
 
 - 初始上传与回滚保存完整快照（FULL），普通编辑只保存修改片段（PATCH）
 - 同一用户 60 秒内的连续编辑合并为一个 PATCH 版本以节省空间
 - 每累计 20 个连续 PATCH 版本自动落一个 FULL 快照，版本重建从最近的快照开始重放，成本有上界
-- 历史版本列表、下载、相邻版本差异查看
+- 历史版本列表、下载、相邻版本差异查看（基于行级 LCS diff，多处改动分别展示）
 - 版本回滚：仅文档所有者或 `ADMIN` 可回滚；存在活动锁时禁止回滚；回滚生成新版本并同步刷新其他在线用户
 
 ### 持久化与部署
@@ -55,7 +58,9 @@
 
 ### 安全设计
 
-- 认证拦截在 Javalin `before` 处理器中通过抛出 `UnauthorizedResponse` 中断请求管线，未认证请求不会执行任何业务处理器（有专门的回归测试覆盖"401 不泄露响应体"）
+- 认证拦截在 Javalin `before` 处理器中通过抛出 `UnauthorizedResponse` 中断请求管线，未认证请求不会执行任何业务处理器（有专门的回归测试覆盖"401 不泄露响应体"）；CORS 预检 OPTIONS 请求例外放行
+- 注册用户名/密码做格式校验（用户名 2-32 位、字母数字下划线连字符或中文；密码 6-64 位）
+- 文档内部存储路径（`currentPath`）通过 `@JsonIgnore` 对客户端隐藏，仅用于持久化
 - 服务层返回机器可读错误码（`ErrorCodes`），HTTP 层按错误码映射状态码，不做消息文本匹配
 - 服务端异常只记录日志，对客户端返回通用错误信息，不泄露内部路径和堆栈
 - CORS 默认仅允许 `http://localhost:8003` / `http://127.0.0.1:8003`，可通过环境变量配置
@@ -74,8 +79,9 @@
 
 ```text
 .
+├── Dockerfile              # 多阶段构建，运行可执行 fat jar（target/app.jar）
 ├── frontend
-│   ├── index.html          # 登录/注册、文档列表、编辑器、历史版本弹窗
+│   ├── index.html          # 登录/注册、文档列表、编辑器、历史版本弹窗、改密码
 │   └── app.js              # Vue 3 应用：锁管理、自动保存、SSE 同步、坐标映射
 ├── data
 │   ├── documents           # 当前文档文件（运行时生成）
@@ -86,11 +92,11 @@
 │   │   ├── model           # Document / DocumentVersion / RangeLock / Response / ErrorCodes ...
 │   │   ├── server          # HttpApiServer / DocumentEventBroker / ServerConfig / ServerMain
 │   │   ├── service         # DocumentService / LockService / VersionService / UserService
-│   │   ├── storage         # FileStorage / VersionStorage / JsonStore / StoredUser
+│   │   ├── storage         # FileStorage / VersionStorage / JsonStore / StoredUser / StoredDocument
 │   │   └── util            # PasswordHasher / FileNames / IdGenerator / DateTimeUtil
 │   └── test/java/com/sharedoc
-│       ├── server          # HTTP 冒烟流程 + 安全回归测试（越权、提权、回滚权限、CORS 预检）
-│       ├── service         # 文档 / 锁（TTL）/ 版本（快照）/ 用户 / 持久化（重启恢复）测试
+│       ├── server          # HTTP 冒烟流程 + 安全回归测试（越权、提权、权限、CORS 预检、改密码、删除）
+│       ├── service         # 文档（增删改）/ 锁（TTL）/ 版本（快照）/ 用户（改密码）/ 持久化测试
 │       └── testutil        # 测试状态重置工具
 └── pom.xml
 ```
@@ -122,10 +128,28 @@
 
 ## 启动
 
+开发模式（直接用 Maven 运行）：
+
 ```powershell
 mvn clean compile
 mvn exec:java "-Dexec.mainClass=com.sharedoc.server.ServerMain"
 ```
+
+打包为可执行 fat jar 并运行：
+
+```bash
+mvn clean package          # 生成 target/app.jar
+java -jar target/app.jar
+```
+
+Docker 运行（数据持久化到挂载卷）：
+
+```bash
+docker build -t sharedoc .
+docker run -p 8082:8082 -v sharedoc-data:/data sharedoc
+```
+
+容器内 `/data` 通过 VOLUME 持久化，并暴露 `GET /api/v1/health` 健康检查。
 
 后端默认监听 `http://localhost:8082`，并在该端口直接托管前端页面。
 
@@ -159,12 +183,16 @@ python -m http.server 8003
 
 ## 主要接口
 
+- `GET /api/v1/health` — 健康检查（无需认证）
 - `POST /api/v1/auth/login` — 登录，返回 token 与用户信息（含角色）
 - `POST /api/v1/auth/register` — 注册（角色固定为 USER）
 - `POST /api/v1/auth/logout` — 登出并释放编辑锁
+- `POST /api/v1/auth/password` — 修改密码
 - `GET /api/v1/auth/me` — 当前用户信息
 - `GET /api/v1/documents` — 文档列表
 - `POST /api/v1/documents` — 上传（multipart，大小/类型/文件名校验）
+- `DELETE /api/v1/documents/{id}` — 删除文档（owner/ADMIN）
+- `PATCH /api/v1/documents/{id}` — 重命名文档（owner/ADMIN）
 - `GET /api/v1/documents/{id}/preview` — 在线预览
 - `GET /api/v1/documents/{id}/content` — 编辑器全文加载
 - `GET /api/v1/documents/{id}/download` — 下载当前文档
@@ -185,18 +213,20 @@ python -m http.server 8003
 mvn test
 ```
 
-当前共 40 个测试，覆盖：
+当前共 50 个测试，覆盖：
 
-- 文档服务：上传 / 预览 / 下载、区间锁并行与排队晋升、坐标平移、补丁合并、并发保存串行化、回滚权限、文件名路径穿越净化、上传大小限制
+- 文档服务：上传 / 预览 / 下载、删除（含权限与活动锁拦截）、重命名（含权限/类型校验）、区间锁并行与排队晋升、坐标平移、补丁合并、并发保存串行化、回滚权限、文件名路径穿越净化、上传大小限制
 - 锁服务：过期锁自动释放、过期后排队锁晋升
 - 版本服务：长补丁链自动快照与重建正确性
-- 用户服务：登录 / 注册 / 登出释放锁、角色固定 USER、密码不外泄
+- 用户服务：登录 / 注册（含格式校验）/ 登出释放锁、角色固定 USER、密码不外泄、修改密码
 - 持久化：文档/版本/用户跨“重启”（重建服务实例）恢复、ID 不冲突
-- HTTP 层：完整冒烟流程、未认证请求 401 且不泄露数据（回归测试）、CORS 预检放行、注册无法提权、非所有者回滚 403、登录响应不含密码
+- HTTP 层：完整冒烟流程、未认证 401 不泄露数据、currentPath 不外泄、CORS 预检放行、注册无法提权、删除/重命名/改密码端点、非所有者回滚 403、健康检查
 
 ## 当前限制
 
 - 数据持久化为本地 JSON 文件 + 文件系统，单节点部署，未考虑多实例横向扩展或数据库
+- 每次变更全量重写对应元数据文件，文档量很大时写放大明显（当前规模无影响）
 - 编辑锁与在线状态按设计保存在内存中，重启后清空（文档内容、版本、账号会从 `data/` 恢复）
-- 版本差异展示使用前后缀对比 / 补丁片段，不是完整的 Myers diff
+- 版本差异为行级 LCS diff（非字符级 Myers diff），重命名只改显示名、物理文件名不变
+- 在线状态只展示“谁在看该文档”，未做实时光标坐标广播
 - 中文输入法（IME）合成输入在区间锁边界处的行为未做专门处理

@@ -69,7 +69,7 @@ class UserServiceTest {
         Response login = userService.login("tester-reg", "pass123");
         assertTrue(login.isSuccess());
 
-        Response duplicate = userService.register("tester-reg", "other");
+        Response duplicate = userService.register("tester-reg", "otherpass");
         assertFalse(duplicate.isSuccess());
         assertEquals("用户名已存在", duplicate.getMessage());
 
@@ -90,6 +90,26 @@ class UserServiceTest {
         User found = userService.findByUsername("role-check");
         assertEquals("USER", found.getRole());
         assertNull(found.getPassword());
+    }
+
+    @Test
+    void registerRejectsInvalidUsernameAndShortPassword() {
+        assertFalse(userService.register("a", "pass123").isSuccess());          // too short
+        assertFalse(userService.register("bad name!", "pass123").isSuccess());  // illegal chars
+        assertFalse(userService.register("validname", "123").isSuccess());      // short password
+        assertTrue(userService.register("valid_name-1", "pass123").isSuccess());
+    }
+
+    @Test
+    void changePasswordRequiresCorrectCurrentAndUpdatesHash() {
+        assertTrue(userService.register("pwduser", "oldpass").isSuccess());
+
+        assertFalse(userService.changePassword("pwduser", "wrong", "newpass1").isSuccess());
+        assertFalse(userService.changePassword("pwduser", "oldpass", "123").isSuccess());
+
+        assertTrue(userService.changePassword("pwduser", "oldpass", "newpass1").isSuccess());
+        assertFalse(userService.login("pwduser", "oldpass").isSuccess());
+        assertTrue(userService.login("pwduser", "newpass1").isSuccess());
     }
 
     private Document uploadDocument(String username, String fileName, String content) {

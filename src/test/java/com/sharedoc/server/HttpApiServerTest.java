@@ -244,6 +244,66 @@ class HttpApiServerTest {
     }
 
     @Test
+    void documentResponsesDoNotLeakInternalStoragePath() throws Exception {
+        String token = login("admin", "123456");
+        String documentId = uploadTextDocument(token, "leak.md", "x");
+
+        HttpResponse<String> list = sendJson("GET", "/documents", null, token);
+        assertFalse(list.body().contains("currentPath"),
+                "Document list must not expose the internal storage path");
+
+        HttpResponse<String> content = sendJson("GET", "/documents/" + documentId + "/content", null, token);
+        assertFalse(content.body().contains("currentPath"),
+                "Document content must not expose the internal storage path");
+    }
+
+    @Test
+    void deleteAndRenameEndpointsWork() throws Exception {
+        String token = login("admin", "123456");
+        String documentId = uploadTextDocument(token, "manage.md", "content");
+
+        HttpResponse<String> rename = sendJson("PATCH", "/documents/" + documentId, """
+                {"fileName":"renamed.md"}
+                """, token);
+        assertEquals(200, rename.statusCode());
+        assertEquals("renamed.md", map(map(jsonResponse(rename).get("data")).get("document")).get("fileName"));
+
+        HttpResponse<String> delete = sendJson("DELETE", "/documents/" + documentId, null, token);
+        assertEquals(200, delete.statusCode());
+
+        HttpResponse<String> afterDelete = sendJson("GET", "/documents/" + documentId + "/content", null, token);
+        assertEquals(404, afterDelete.statusCode());
+    }
+
+    @Test
+    void changePasswordEndpointUpdatesCredentials() throws Exception {
+        registerAndLoginUser("dave", "oldpass1");
+        String token = login("dave", "oldpass1");
+
+        HttpResponse<String> change = sendJson("POST", "/auth/password", """
+                {"currentPassword":"oldpass1","newPassword":"newpass1"}
+                """, token);
+        assertEquals(200, change.statusCode());
+
+        HttpResponse<String> oldLogin = sendJson("POST", "/auth/login", """
+                {"username":"dave","password":"oldpass1"}
+                """, null);
+        assertEquals(401, oldLogin.statusCode());
+
+        HttpResponse<String> newLogin = sendJson("POST", "/auth/login", """
+                {"username":"dave","password":"newpass1"}
+                """, null);
+        assertEquals(200, newLogin.statusCode());
+    }
+
+    @Test
+    void healthEndpointIsPublic() throws Exception {
+        HttpResponse<String> health = sendJson("GET", "/health", null, null);
+        assertEquals(200, health.statusCode());
+        assertEquals("UP", map(jsonResponse(health).get("data")).get("status"));
+    }
+
+    @Test
     void unauthorizedRequestsAreRejectedWithoutLeakingData() throws Exception {
         String adminToken = login("admin", "123456");
         String documentId = uploadTextDocument(adminToken, "secret.md", "TOP-SECRET-CONTENT");

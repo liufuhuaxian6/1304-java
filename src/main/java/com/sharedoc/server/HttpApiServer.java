@@ -140,6 +140,13 @@ public class HttpApiServer {
         app.before("/api/v1/documents", this::requireAuth);
         app.before("/api/v1/auth/me", this::requireAuth);
         app.before("/api/v1/auth/logout", this::requireAuth);
+        app.before("/api/v1/auth/password", this::requireAuth);
+
+        app.get("/api/v1/health", ctx -> {
+            Map<String, Object> data = new HashMap<>();
+            data.put("status", "UP");
+            ctx.json(success("OK", data));
+        });
 
         app.post("/api/v1/auth/login", ctx -> {
             Map<String, Object> body = parseBody(ctx);
@@ -183,6 +190,20 @@ public class HttpApiServer {
                 return;
             }
             ctx.json(success("获取当前用户成功", user));
+        });
+
+        app.post("/api/v1/auth/password", ctx -> {
+            String username = ctx.attribute("username");
+            Map<String, Object> body = parseBody(ctx);
+            String currentPassword = stringValue(body.get("currentPassword"));
+            String newPassword = stringValue(body.get("newPassword"));
+
+            Response res = userService.changePassword(username, currentPassword, newPassword);
+            if (!res.isSuccess()) {
+                respondError(ctx, res);
+                return;
+            }
+            ctx.json(success("密码修改成功", null));
         });
 
         app.post("/api/v1/auth/register", ctx -> {
@@ -288,6 +309,47 @@ public class HttpApiServer {
             ctx.header("X-Document-Id", doc.getDocumentId());
             ctx.contentType("application/octet-stream");
             ctx.result(content);
+        });
+
+        app.delete("/api/v1/documents/{documentId}", ctx -> {
+            String docId = ctx.pathParam("documentId");
+            String username = ctx.attribute("username");
+            boolean isAdmin = "ADMIN".equals(ctx.attribute("role"));
+
+            Response res = documentService.deleteDocument(username, docId, isAdmin);
+            if (!res.isSuccess()) {
+                respondError(ctx, res);
+                return;
+            }
+            ctx.json(success("文档已删除", res.getData()));
+
+            Map<String, Object> event = new HashMap<>();
+            event.put("documentId", docId);
+            event.put("editor", username);
+            eventBroker.broadcast(docId, "document-deleted", event);
+        });
+
+        app.patch("/api/v1/documents/{documentId}", ctx -> {
+            String docId = ctx.pathParam("documentId");
+            String username = ctx.attribute("username");
+            boolean isAdmin = "ADMIN".equals(ctx.attribute("role"));
+            Map<String, Object> body = parseBody(ctx);
+            String newFileName = stringValue(body.get("fileName"));
+
+            Response res = documentService.renameDocument(username, docId, newFileName, isAdmin);
+            if (!res.isSuccess()) {
+                respondError(ctx, res);
+                return;
+            }
+            ctx.json(success("文档已重命名", res.getData()));
+
+            @SuppressWarnings("unchecked")
+            Map<String, Object> data = (Map<String, Object>) res.getData();
+            Document document = (Document) data.get("document");
+            Map<String, Object> event = new HashMap<>();
+            event.put("document", document);
+            event.put("editor", username);
+            eventBroker.broadcast(docId, "document-renamed", event);
         });
 
         app.post("/api/v1/documents/{documentId}/lock", ctx -> {
@@ -485,6 +547,7 @@ public class HttpApiServer {
         app.sse("/api/v1/documents/{documentId}/events", client -> {
             Context ctx = client.ctx();
             String docId = ctx.pathParam("documentId");
+            String username = ctx.attribute("username");
             if (!documentService.documentExists(docId)) {
                 ctx.status(404);
                 client.close();
@@ -492,7 +555,7 @@ public class HttpApiServer {
             }
 
             client.keepAlive();
-            eventBroker.addSubscriber(docId, client);
+            eventBroker.addSubscriber(docId, username, client);
         });
     }
 

@@ -40,6 +40,10 @@ public class VersionStorage {
         fileStorage.saveFile(versionPath, content.getBytes(StandardCharsets.UTF_8));
     }
 
+    public void deleteVersionFile(String versionPath) {
+        fileStorage.deleteFile(versionPath);
+    }
+
     public String readVersionText(String versionPath) {
         return new String(fileStorage.readFile(versionPath), StandardCharsets.UTF_8);
     }

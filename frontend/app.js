@@ -247,11 +247,14 @@ createApp({
         const loginForm = reactive({ username: '', password: '' });
         const showRegister = ref(false);
         const registerForm = reactive({ username: '', password: '', confirm: '' });
+        const showPasswordDialog = ref(false);
+        const passwordForm = reactive({ current: '', next: '', confirm: '' });
         const error = ref('');
         const toast = ref('');
 
         const currentView = ref('list');
         const documents = ref([]);
+        const onlineUsers = ref([]);
 
         const currentDocument = ref(null);
         const documentContent = ref('');
@@ -376,6 +379,7 @@ createApp({
                 eventSource.value.close();
                 eventSource.value = null;
             }
+            onlineUsers.value = [];
         };
 
         const clearPendingEdits = () => {
@@ -453,6 +457,26 @@ createApp({
                 showToast(`${payload.editor || '其他用户'} 已回滚文档到版本 ${payload.versionId}`);
             });
 
+            source.addEventListener('presence-changed', (event) => {
+                const payload = JSON.parse(event.data);
+                onlineUsers.value = payload.onlineUsers || [];
+            });
+
+            source.addEventListener('document-renamed', async (event) => {
+                const payload = JSON.parse(event.data);
+                if (currentDocument.value && payload.document) {
+                    currentDocument.value = normalizeDocument(payload.document);
+                }
+                await fetchDocuments(true);
+                showToast(`${payload.editor || '其他用户'} 已重命名该文档`);
+            });
+
+            source.addEventListener('document-deleted', async (event) => {
+                const payload = JSON.parse(event.data);
+                showToast(`${payload.editor || '其他用户'} 已删除该文档`);
+                await backToList();
+            });
+
             source.onerror = async () => {
                 closeEventStream();
                 if (currentDocument.value?.documentId) {
@@ -516,6 +540,43 @@ createApp({
             } catch (e) {
             }
             clearSession();
+        };
+
+        const openPasswordDialog = () => {
+            passwordForm.current = '';
+            passwordForm.next = '';
+            passwordForm.confirm = '';
+            error.value = '';
+            showPasswordDialog.value = true;
+        };
+
+        const closePasswordDialog = () => {
+            showPasswordDialog.value = false;
+        };
+
+        const changePassword = async () => {
+            error.value = '';
+            if (!passwordForm.current || !passwordForm.next) {
+                showToast('请填写当前密码和新密码');
+                return;
+            }
+            if (passwordForm.next !== passwordForm.confirm) {
+                showToast('两次输入的新密码不一致');
+                return;
+            }
+            try {
+                await apiCall('/auth/password', {
+                    method: 'POST',
+                    body: JSON.stringify({
+                        currentPassword: passwordForm.current,
+                        newPassword: passwordForm.next
+                    })
+                });
+                showToast('密码修改成功');
+                showPasswordDialog.value = false;
+            } catch (err) {
+                showToast(err.message || '密码修改失败');
+            }
         };
 
         const checkAuth = async () => {
@@ -582,6 +643,48 @@ createApp({
                 showToast('下载成功');
             } catch (err) {
                 showToast(err.message || '下载失败');
+            }
+        };
+
+        const deleteDocument = async (doc) => {
+            const docId = getDocumentId(doc);
+            if (!docId) {
+                return;
+            }
+            if (!confirm(`确认删除文档「${doc.fileName}」吗？该操作会一并删除其全部历史版本，且不可恢复。`)) {
+                return;
+            }
+            try {
+                await apiCall(`/documents/${docId}`, { method: 'DELETE' });
+                showToast('文档已删除');
+                await fetchDocuments();
+            } catch (err) {
+                showToast(err.message || '删除失败');
+            }
+        };
+
+        const renameDocument = async (doc) => {
+            const docId = getDocumentId(doc);
+            if (!docId) {
+                return;
+            }
+            const newName = prompt('请输入新的文件名（含扩展名）：', doc.fileName);
+            if (newName === null) {
+                return;
+            }
+            const trimmed = newName.trim();
+            if (!trimmed || trimmed === doc.fileName) {
+                return;
+            }
+            try {
+                await apiCall(`/documents/${docId}`, {
+                    method: 'PATCH',
+                    body: JSON.stringify({ fileName: trimmed })
+                });
+                showToast('文档已重命名');
+                await fetchDocuments();
+            } catch (err) {
+                showToast(err.message || '重命名失败');
             }
         };
 
@@ -1108,9 +1211,31 @@ createApp({
             documentContent.value = '';
             revision.value = 0;
             activeLocks.value = [];
+            onlineUsers.value = [];
             currentLock.value = null;
             clearPendingEdits();
             await fetchDocuments();
+        };
+
+        // Release the lock when the tab/window closes so a closed browser does
+        // not hold a range until its TTL expires. fetch keepalive lets the
+        // request (with the auth header) survive the unload.
+        const releaseLockOnUnload = () => {
+            if (!currentLock.value || !currentDocument.value) {
+                return;
+            }
+            const token = AUTH_STORAGE.getItem('token');
+            if (!token) {
+                return;
+            }
+            try {
+                fetch(`${API_BASE}/documents/${currentDocument.value.documentId}/lock`, {
+                    method: 'DELETE',
+                    headers: { Authorization: `Bearer ${token}` },
+                    keepalive: true
+                });
+            } catch (e) {
+            }
         };
 
         const opLabel = (op) => ({
@@ -1231,6 +1356,7 @@ createApp({
 
         onMounted(() => {
             checkAuth();
+            window.addEventListener('beforeunload', releaseLockOnUnload);
         });
 
         return {
@@ -1240,6 +1366,14 @@ createApp({
             registerForm,
             register,
             toggleRegister,
+            showPasswordDialog,
+            passwordForm,
+            openPasswordDialog,
+            closePasswordDialog,
+            changePassword,
+            onlineUsers,
+            deleteDocument,
+            renameDocument,
             error,
             toast,
             currentView,

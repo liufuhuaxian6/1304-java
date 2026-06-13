@@ -21,6 +21,7 @@ import java.nio.file.Path;
 import java.time.Duration;
 import java.time.LocalDateTime;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -135,6 +136,23 @@ public class VersionService {
         synchronized (versionLock) {
             List<DocumentVersion> versions = versionMap.getOrDefault(documentId, new ArrayList<>());
             return new Response(true, "历史版本列表获取成功", new ArrayList<>(versions));
+        }
+    }
+
+    /** Removes all version records and stored version files for one document. */
+    public void deleteDocumentVersions(String documentId) {
+        synchronized (versionLock) {
+            List<DocumentVersion> versions = versionMap.remove(documentId);
+            if (versions != null) {
+                for (DocumentVersion version : versions) {
+                    try {
+                        versionStorage.deleteVersionFile(version.getVersionPath());
+                    } catch (Exception e) {
+                        LOGGER.warn("Failed to delete version file {}", version.getVersionPath(), e);
+                    }
+                }
+            }
+            persist();
         }
     }
 
@@ -426,6 +444,12 @@ public class VersionService {
         return current;
     }
 
+    /**
+     * Line-level diff between two full texts via a longest-common-subsequence
+     * walk over lines. Produces one change per contiguous block of removed
+     * and/or added lines, so multi-region edits are shown separately instead
+     * of collapsed into a single coarse block.
+     */
     private List<Map<String, Object>> buildDiffChanges(String previousContent, String currentContent) {
         String previous = previousContent == null ? "" : previousContent;
         String current = currentContent == null ? "" : currentContent;
@@ -433,27 +457,73 @@ public class VersionService {
             return new ArrayList<>();
         }
 
-        int prefixLength = commonPrefixLength(previous, current);
-        int previousSuffix = previous.length() - 1;
-        int currentSuffix = current.length() - 1;
-        while (previousSuffix >= prefixLength
-                && currentSuffix >= prefixLength
-                && previous.charAt(previousSuffix) == current.charAt(currentSuffix)) {
-            previousSuffix -= 1;
-            currentSuffix -= 1;
+        List<String> before = splitLines(previous);
+        List<String> after = splitLines(current);
+        int n = before.size();
+        int m = after.size();
+
+        int[][] lcs = new int[n + 1][m + 1];
+        for (int i = n - 1; i >= 0; i -= 1) {
+            for (int j = m - 1; j >= 0; j -= 1) {
+                lcs[i][j] = before.get(i).equals(after.get(j))
+                        ? lcs[i + 1][j + 1] + 1
+                        : Math.max(lcs[i + 1][j], lcs[i][j + 1]);
+            }
         }
 
-        String removed = previous.substring(prefixLength, previousSuffix + 1);
-        String added = current.substring(prefixLength, currentSuffix + 1);
-        Map<String, Object> change = new HashMap<>();
-        change.put("start", prefixLength);
-        change.put("end", previousSuffix + 1);
-        change.put("type", diffType(removed, added));
-        change.put("removedText", removed);
-        change.put("addedText", added);
-        change.put("removedLine", lineNumberAt(previous, prefixLength));
-        change.put("addedLine", lineNumberAt(current, prefixLength));
-        return List.of(change);
+        List<Map<String, Object>> changes = new ArrayList<>();
+        int i = 0;
+        int j = 0;
+        while (i < n || j < m) {
+            if (i < n && j < m && before.get(i).equals(after.get(j))) {
+                i += 1;
+                j += 1;
+                continue;
+            }
+
+            int removedStartLine = i + 1;
+            int addedStartLine = j + 1;
+            List<String> removed = new ArrayList<>();
+            List<String> added = new ArrayList<>();
+            while (i < n || j < m) {
+                if (i < n && j < m && before.get(i).equals(after.get(j))) {
+                    break;
+                }
+                boolean takeFromBefore;
+                if (i >= n) {
+                    takeFromBefore = false;
+                } else if (j >= m) {
+                    takeFromBefore = true;
+                } else {
+                    takeFromBefore = lcs[i + 1][j] >= lcs[i][j + 1];
+                }
+                if (takeFromBefore) {
+                    removed.add(before.get(i));
+                    i += 1;
+                } else {
+                    added.add(after.get(j));
+                    j += 1;
+                }
+            }
+
+            String removedText = String.join("\n", removed);
+            String addedText = String.join("\n", added);
+            Map<String, Object> change = new HashMap<>();
+            change.put("type", diffType(removedText, addedText));
+            change.put("removedText", removedText);
+            change.put("addedText", addedText);
+            change.put("removedLine", removedStartLine);
+            change.put("addedLine", addedStartLine);
+            changes.add(change);
+        }
+        return changes;
+    }
+
+    private List<String> splitLines(String content) {
+        if (content.isEmpty()) {
+            return new ArrayList<>();
+        }
+        return new ArrayList<>(Arrays.asList(content.split("\n", -1)));
     }
 
     private List<Map<String, Object>> buildVersionChanges(DocumentVersion version, String previousContent, String currentContent) {
@@ -474,15 +544,6 @@ public class VersionService {
             changes.add(change);
         }
         return changes;
-    }
-
-    private int commonPrefixLength(String left, String right) {
-        int max = Math.min(left.length(), right.length());
-        int index = 0;
-        while (index < max && left.charAt(index) == right.charAt(index)) {
-            index += 1;
-        }
-        return index;
     }
 
     private String diffType(String removed, String added) {

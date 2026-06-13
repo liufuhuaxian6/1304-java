@@ -11,6 +11,7 @@ import com.sharedoc.model.Response;
 import com.sharedoc.server.ServerConfig;
 import com.sharedoc.storage.FileStorage;
 import com.sharedoc.storage.JsonStore;
+import com.sharedoc.storage.StoredDocument;
 import com.sharedoc.util.FileNames;
 import com.sharedoc.util.IdGenerator;
 import org.slf4j.Logger;
@@ -59,17 +60,19 @@ public class DocumentService {
     }
 
     private void loadDocuments() {
-        List<Document> stored = documentStore.read(new TypeReference<List<Document>>() { });
+        List<StoredDocument> stored = documentStore.read(new TypeReference<List<StoredDocument>>() { });
         if (stored == null) {
             return;
         }
         long maxId = 0;
-        for (Document document : stored) {
-            // Locks never survive a restart, so the derived editing state is
-            // reset; it is recomputed from live locks on the next read.
-            document.setEditingUser(null);
-            document.setEditingStartTime(null);
-            document.setActiveLockCount(0);
+        for (StoredDocument record : stored) {
+            Document document = new Document(
+                    record.getDocumentId(), record.getFileName(), record.getOwner(), record.getCurrentPath());
+            document.setUploadTime(record.getUploadTime());
+            document.setLastModifiedTime(record.getLastModifiedTime());
+            document.setRevision(record.getRevision());
+            // Locks never survive a restart, so the derived editing state stays
+            // at its default and is recomputed from live locks on the next read.
             documents.put(document.getDocumentId(), document);
             maxId = Math.max(maxId, IdGenerator.numericSuffix(document.getDocumentId()));
         }
@@ -77,7 +80,19 @@ public class DocumentService {
     }
 
     private void persistDocuments() {
-        documentStore.write(new ArrayList<>(documents.values()));
+        List<StoredDocument> records = new ArrayList<>();
+        for (Document document : documents.values()) {
+            StoredDocument record = new StoredDocument();
+            record.setDocumentId(document.getDocumentId());
+            record.setFileName(document.getFileName());
+            record.setOwner(document.getOwner());
+            record.setCurrentPath(document.getCurrentPath());
+            record.setUploadTime(document.getUploadTime());
+            record.setLastModifiedTime(document.getLastModifiedTime());
+            record.setRevision(document.getRevision());
+            records.add(record);
+        }
+        documentStore.write(records);
     }
 
     public boolean documentExists(String documentId) {
@@ -411,6 +426,70 @@ public class DocumentService {
                 persistDocuments();
             }
             return rollbackResponse;
+        }
+    }
+
+    /**
+     * Deletes a document, its current file and all of its version files.
+     * Only the owner or an ADMIN may delete, and not while any lock is held.
+     */
+    public Response deleteDocument(String username, String documentId, boolean isAdmin) {
+        Document document = documents.get(documentId);
+        if (document == null) {
+            return Response.fail(ErrorCodes.DOCUMENT_NOT_FOUND, "文档不存在");
+        }
+        if (!isAdmin && (username == null || !username.equals(document.getOwner()))) {
+            return Response.fail(ErrorCodes.FORBIDDEN, "只有文档所有者或管理员可以删除该文档");
+        }
+
+        synchronized (documentMonitor(documentId)) {
+            if (lockService.hasAnyLock(documentId)) {
+                return Response.fail(ErrorCodes.ACTIVE_LOCKS_PRESENT, "当前文档存在活动编辑区间，无法删除");
+            }
+
+            documents.remove(documentId);
+            versionService.deleteDocumentVersions(documentId);
+            try {
+                fileStorage.deleteFile(document.getCurrentPath());
+            } catch (Exception e) {
+                LOGGER.warn("Failed to delete document file {}", document.getCurrentPath(), e);
+            }
+            persistDocuments();
+
+            Map<String, Object> result = new HashMap<>();
+            result.put("documentId", documentId);
+            return new Response(true, "文档已删除", result);
+        }
+    }
+
+    /**
+     * Renames a document's display name. The physical file and historical
+     * versions keep their original names; only the owner or an ADMIN may rename.
+     */
+    public Response renameDocument(String username, String documentId, String newFileName, boolean isAdmin) {
+        Document document = documents.get(documentId);
+        if (document == null) {
+            return Response.fail(ErrorCodes.DOCUMENT_NOT_FOUND, "文档不存在");
+        }
+        if (!isAdmin && (username == null || !username.equals(document.getOwner()))) {
+            return Response.fail(ErrorCodes.FORBIDDEN, "只有文档所有者或管理员可以重命名该文档");
+        }
+        if (newFileName == null || newFileName.isBlank()) {
+            return Response.fail("文件名不能为空");
+        }
+        String safeFileName = FileNames.sanitize(newFileName);
+        if (!isAllowedFileType(safeFileName)) {
+            return Response.fail(ErrorCodes.UNSUPPORTED_FILE_TYPE, "不支持的文件类型");
+        }
+
+        synchronized (documentMonitor(documentId)) {
+            document.setFileName(safeFileName);
+            document.setLastModifiedTime(LocalDateTime.now());
+            persistDocuments();
+
+            Map<String, Object> result = new HashMap<>();
+            result.put("document", document);
+            return new Response(true, "文档已重命名", result);
         }
     }
 

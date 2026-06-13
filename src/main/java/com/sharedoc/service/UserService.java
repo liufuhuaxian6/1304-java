@@ -104,11 +104,13 @@ public class UserService {
      * never be obtained through self-registration.
      */
     public Response register(String username, String password) {
-        if (username == null || username.isBlank()) {
-            return Response.fail("用户名不能为空");
+        String usernameError = validateUsername(username);
+        if (usernameError != null) {
+            return Response.fail(usernameError);
         }
-        if (password == null || password.isBlank()) {
-            return Response.fail("密码不能为空");
+        String passwordError = validatePassword(password);
+        if (passwordError != null) {
+            return Response.fail(passwordError);
         }
         if (users.containsKey(username)) {
             return Response.fail(ErrorCodes.USERNAME_TAKEN, "用户名已存在");
@@ -118,6 +120,45 @@ public class UserService {
         users.put(username, user);
         persist();
         return Response.ok("注册成功", sanitized(user));
+    }
+
+    /** Changes a user's password after verifying the current one. */
+    public Response changePassword(String username, String currentPassword, String newPassword) {
+        if (username == null || username.isBlank()) {
+            return Response.fail(ErrorCodes.AUTH_REQUIRED, "请先登录");
+        }
+        User user = users.get(username);
+        if (user == null || !PasswordHasher.verify(currentPassword, user.getPassword())) {
+            return Response.fail(ErrorCodes.INVALID_CREDENTIALS, "当前密码不正确");
+        }
+        String passwordError = validatePassword(newPassword);
+        if (passwordError != null) {
+            return Response.fail(passwordError);
+        }
+        user.setPassword(PasswordHasher.hash(newPassword));
+        persist();
+        return Response.ok("密码修改成功");
+    }
+
+    private String validateUsername(String username) {
+        if (username == null || username.isBlank()) {
+            return "用户名不能为空";
+        }
+        // Letters, digits, underscore, hyphen and CJK characters, 2-32 long.
+        if (!username.matches("^[A-Za-z0-9_\\-\\u4e00-\\u9fa5]{2,32}$")) {
+            return "用户名只能包含字母、数字、下划线、连字符或中文，长度 2-32";
+        }
+        return null;
+    }
+
+    private String validatePassword(String password) {
+        if (password == null || password.isBlank()) {
+            return "密码不能为空";
+        }
+        if (password.length() < 6 || password.length() > 64) {
+            return "密码长度需为 6-64 位";
+        }
+        return null;
     }
 
     /** Returns the user without the password hash, or null when unknown. */
