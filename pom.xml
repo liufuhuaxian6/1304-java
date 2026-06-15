@@ -74,6 +74,13 @@
                 <version>3.2.5</version>
                 <configuration>
                     <useModulePath>false</useModulePath>
+                    <!-- Isolate test data under target/ so running `mvn test`
+                         never touches a live deployment's data/ directory. -->
+                    <environmentVariables>
+                        <SHAREDOC_DOCUMENT_DIR>target/test-data/documents</SHAREDOC_DOCUMENT_DIR>
+                        <SHAREDOC_VERSION_DIR>target/test-data/versions</SHAREDOC_VERSION_DIR>
+                        <SHAREDOC_METADATA_DIR>target/test-data/metadata</SHAREDOC_METADATA_DIR>
+                    </environmentVariables>
                 </configuration>
             </plugin>
             <!-- Package an executable fat jar (target/app.jar) for `java -jar` / Docker -->

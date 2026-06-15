@@ -453,7 +453,7 @@ class DocumentServiceTest {
         assertEquals("evil.md", document.getFileName());
 
         Path storedPath = Path.of(document.getCurrentPath()).normalize().toAbsolutePath();
-        Path storageRoot = Path.of("data", "documents").normalize().toAbsolutePath();
+        Path storageRoot = Path.of(com.sharedoc.server.ServerConfig.DOCUMENT_STORAGE_PATH).normalize().toAbsolutePath();
         assertTrue(storedPath.startsWith(storageRoot),
                 "Stored file must stay inside the document storage directory: " + storedPath);
     }
@@ -467,6 +467,31 @@ class DocumentServiceTest {
 
         assertFalse(uploadResponse.isSuccess());
         assertEquals("FILE_TOO_LARGE", uploadResponse.getCode());
+    }
+
+    @Test
+    void crlfFilesAreNormalizedToLfSoOffsetsMatchClient() {
+        // A Windows file uses CRLF; the browser textarea normalizes to LF.
+        // The server must store/serve LF so lock ranges and patch offsets agree.
+        Response upload = documentService.uploadDocument(
+                "admin", "crlf.cpp", "line1\r\nline2\r\nline3".getBytes(StandardCharsets.UTF_8));
+        assertTrue(upload.isSuccess());
+        Document document = assertInstanceOf(Document.class, responseData(upload).get("document"));
+
+        Map<String, Object> contentData = responseData(documentService.getDocumentContent(document.getDocumentId()));
+        String content = (String) contentData.get("contentText");
+        assertFalse(content.contains("\r"), "Served content must not contain CR");
+        assertEquals("line1\nline2\nline3", content);
+
+        // Lock "line2" using LF offsets [6,11] and save — must land exactly on line 2.
+        Response lock = documentService.requestEdit(document.getDocumentId(), "admin", 1L, 6, 11);
+        assertTrue(lock.isSuccess());
+        Response save = documentService.saveRange("admin", document.getDocumentId(), lockId(lock), 1L, "LINE2", "edit");
+        assertTrue(save.isSuccess());
+
+        Map<String, Object> downloadData = responseData(documentService.downloadDocument(document.getDocumentId()));
+        byte[] bytes = assertInstanceOf(byte[].class, downloadData.get("fileContent"));
+        assertEquals("line1\nLINE2\nline3", new String(bytes, StandardCharsets.UTF_8));
     }
 
     private Document uploadDocument(String username, String fileName, String content) {

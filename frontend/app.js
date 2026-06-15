@@ -262,6 +262,10 @@ createApp({
         watch(theme, (value) => {
             document.documentElement.dataset.theme = value;
             localStorage.setItem('sharedoc-theme', value);
+            const darkLink = document.getElementById('hljs-dark');
+            const lightLink = document.getElementById('hljs-light');
+            if (darkLink) darkLink.disabled = value === 'light';
+            if (lightLink) lightLink.disabled = value !== 'light';
         }, { immediate: true });
         const toggleTheme = () => { theme.value = theme.value === 'dark' ? 'light' : 'dark'; };
 

@@ -17,6 +17,11 @@
     --ring: rgba(129, 140, 248, .35);
     --shadow: 0 18px 50px -12px rgba(0, 0, 0, .65);
     --shadow-sm: 0 2px 10px rgba(0, 0, 0, .35);
+    --code-bg: #0f1320;
+    --code-text: #cdd3e1;
+    --code-gutter: #5b647c;
+    --code-caret: #ffffff;
+    --code-border: rgba(255, 255, 255, .05);
 }
 
 :root[data-theme="light"] {
@@ -37,13 +42,14 @@
     --ring: rgba(99, 102, 241, .28);
     --shadow: 0 18px 50px -16px rgba(31, 41, 78, .35);
     --shadow-sm: 0 2px 10px rgba(31, 41, 78, .1);
+    --code-bg: #fbfcfe;
+    --code-text: #383a42;
+    --code-gutter: #aab2c5;
+    --code-caret: #1a2233;
+    --code-border: rgba(15, 23, 42, .07);
 }
 
-/* code surface is always dark for contrast */
 :root {
-    --code-bg: #0f1320;
-    --code-text: #cdd3e1;
-    --code-gutter: #5b647c;
     --code-fz: 13.5px;
     --code-lh: 21px;
     --code-pad: 16px;
@@ -234,7 +240,7 @@ body {
 
 .editor-body { flex: 1; display: grid; grid-template-columns: minmax(0, 1fr) 300px; min-height: 0; }
 .code-pane { display: flex; min-width: 0; background: var(--code-bg); }
-.gutter { overflow: hidden; padding: var(--code-pad) 0; text-align: right; user-select: none; flex: none; color: var(--code-gutter); background: var(--code-bg); border-right: 1px solid rgba(255, 255, 255, .05); }
+.gutter { overflow: hidden; padding: var(--code-pad) 0; text-align: right; user-select: none; flex: none; color: var(--code-gutter); background: var(--code-bg); border-right: 1px solid var(--code-border); }
 .gutter-line { padding: 0 14px 0 16px; font-family: 'JetBrains Mono', monospace; font-size: var(--code-fz); line-height: var(--code-lh); }
 .code-area { position: relative; flex: 1; min-width: 0; }
 .code-highlight, .code-input {
@@ -244,9 +250,8 @@ body {
 }
 .code-highlight { pointer-events: none; background: transparent !important; color: var(--code-text); }
 .code-highlight code { background: transparent !important; padding: 0; font: inherit; }
-.code-input { resize: none; background: transparent; color: transparent; caret-color: #fff; outline: none; z-index: 2; }
+.code-input { resize: none; background: transparent; color: transparent; caret-color: var(--code-caret); outline: none; z-index: 2; }
 .code-input::selection { background: rgba(129, 140, 248, .35); }
-.code-input::-webkit-scrollbar-thumb { background: rgba(255, 255, 255, .14); background-clip: padding-box; }
 
 /* ===================== Collab pane ===================== */
 .collab { border-left: 1px solid var(--border); background: var(--surface); padding: 18px; overflow-y: auto; display: flex; flex-direction: column; gap: 22px; }

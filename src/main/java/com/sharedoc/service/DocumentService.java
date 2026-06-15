@@ -135,7 +135,13 @@ public class DocumentService {
         String storagePath = Path.of(ServerConfig.DOCUMENT_STORAGE_PATH, documentId + "_" + safeFileName).toString();
 
         try {
-            fileStorage.saveFile(storagePath, fileContent);
+            // Normalize CRLF/CR to LF on storage so server-side character
+            // offsets always match what the browser textarea reports (textarea
+            // normalizes line endings to LF). Otherwise lock ranges and patch
+            // offsets drift by one char per line between client and server.
+            byte[] storedContent = normalizeNewlines(new String(fileContent, StandardCharsets.UTF_8))
+                    .getBytes(StandardCharsets.UTF_8);
+            fileStorage.saveFile(storagePath, storedContent);
             Document document = new Document(documentId, safeFileName, username, storagePath);
             documents.put(documentId, document);
 
@@ -201,7 +207,7 @@ public class DocumentService {
                         || fileName.endsWith(".yaml") || fileName.endsWith(".sql");
 
                 if (isTextFile) {
-                    preview = new String(fileContent, StandardCharsets.UTF_8);
+                    preview = normalizeNewlines(new String(fileContent, StandardCharsets.UTF_8));
                     if (preview.length() > 1000) {
                         preview = preview.substring(0, 1000) + "\n... (预览截断)";
                     }
@@ -229,7 +235,7 @@ public class DocumentService {
 
         synchronized (documentMonitor(documentId)) {
             try {
-                String content = new String(fileStorage.readFile(document.getCurrentPath()), StandardCharsets.UTF_8);
+                String content = readDocumentText(document);
                 syncDocumentEditingState(document);
 
                 Map<String, Object> result = new HashMap<>();
@@ -309,7 +315,7 @@ public class DocumentService {
             }
 
             try {
-                String content = new String(fileStorage.readFile(document.getCurrentPath()), StandardCharsets.UTF_8);
+                String content = readDocumentText(document);
                 int start = lock.getCurrentStart();
                 int end = lock.getCurrentEnd();
                 if (start < 0 || end < start || end > content.length()) {
@@ -555,7 +561,16 @@ public class DocumentService {
     }
 
     private int getDocumentLength(Document document) {
-        return new String(fileStorage.readFile(document.getCurrentPath()), StandardCharsets.UTF_8).length();
+        return readDocumentText(document).length();
+    }
+
+    /** Reads the document as text with line endings normalized to LF. */
+    private String readDocumentText(Document document) {
+        return normalizeNewlines(new String(fileStorage.readFile(document.getCurrentPath()), StandardCharsets.UTF_8));
+    }
+
+    private static String normalizeNewlines(String text) {
+        return text.replace("\r\n", "\n").replace("\r", "\n");
     }
 
     private Object documentMonitor(String documentId) {
